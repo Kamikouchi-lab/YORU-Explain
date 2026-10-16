@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+
+# Test / tool caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Downloaded weights, the test fixture model's training run and its dataset copy
+.cache/
+
+# Models, videos and analysis output never belong in the repository
+*.pt
+*.pth
+*.onnx
+*.mp4
+*.avi
+results/
+explain_projects/

@@ -1,0 +1,64 @@
+[project]
+name = "yoru-explain"
+version = "0.1.0"
+description = "YORU-Explain - perturbation and attribution analysis of YORU's behaviour detections"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Hayato M Yamanouchi", email = "122147942+HMYamano@users.noreply.github.com" }
+]
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    # The YOLOv5 adapter runs YORU's bundled YOLOv5 code -- the only code that
+    # loads a YORU v1 checkpoint -- and checks itself against YORU's own
+    # detector.  The bound is the 2.x line YORU's docs/external_api.md covers.
+    "yoru>=2.0.0b3,<3",
+    # Imported directly.  Unpinned on purpose: YORU pins them, and a second
+    # set of pins here could only disagree with it.
+    "numpy",
+    "opencv-python",
+    "torch",
+    "torchvision",
+    # The GUI.  On Windows YORU already pins PyQt5 5.15.11 (for labelImg).
+    "PyQt5>=5.15",
+]
+
+[project.scripts]
+yoru-explain = "yoru_explain.app:main"
+
+[dependency-groups]
+dev = [
+    "pytest==7.4.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+# Development only: a YORU checkout beside this repository, as for
+# YORU-Tracker.  A built wheel names just "yoru>=2.0.0b3,<3"; see README for
+# installing without the sibling checkout.
+[tool.uv.sources]
+yoru = { path = "../YORU", editable = true }
+# The same CUDA 12.8 builds YORU uses (RTX 50-series needs cu128).  Named
+# here as well because torch is a direct dependency of this project too.
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "gui: creates Qt widgets (runs offscreen)",
+    "slow: runs a real YOLOv5 model",
+]

@@ -1,0 +1,65 @@
+# Tests on every push and pull request -- modelled on YORU-Tracker's CI.
+# NOT RUN YET: this repository has no remote; the workflow is untested.
+#
+# YORU-Explain is built against a YORU checkout beside it (pyproject's
+# [tool.uv.sources]), so the job checks YORU out next to this repository.
+# The integration tests need yolov5s.pt (downloaded below); the fly fixture
+# model is not public, so its tests skip in CI.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      yoru_ref:
+        description: YORU branch, tag or commit to test against
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: YORU-Explain
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: YORU-Explain
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.YORU_REPOSITORY || 'Kamikouchi-lab/YORU' }}
+          ref: ${{ inputs.yoru_ref || vars.YORU_REF || 'yoru-tracker-lite' }}
+          path: YORU
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.23"
+          enable-cache: true
+          cache-dependency-glob: YORU-Explain/uv.lock
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Test weights
+        run: |
+          mkdir -p .cache/models
+          curl -sSL --retry 3 -o .cache/models/yolov5s.pt \
+            https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt
+
+      - name: Tests (unit, integration, offscreen GUI)
+        run: uv run pytest
