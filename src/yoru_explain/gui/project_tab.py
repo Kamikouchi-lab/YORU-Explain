@@ -7,166 +7,153 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
+import dearpygui.dearpygui as dpg
 
-from yoru_explain.gui.qtutil import error_box, fill_table, selected_data, table
-from yoru_explain.gui.state import AppState, project_name, short
+from yoru_explain.gui import widgets
+from yoru_explain.gui.state import project_name
+from yoru_explain.gui.widgets import SelectTable, short, tooltip
 
-VIDEO_FILTER = "Videos and images (*.mp4 *.avi *.mov *.mkv *.wmv *.m4v *.mpg *.mpeg *.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
+CHANNELS = ("YORU setting (YORU_YOLOV5_RGB)", "BGR (YORU v1)", "RGB")
 
 
-class ProjectTab(QtWidgets.QWidget):
-    def __init__(self, state: AppState, parent=None):
-        super().__init__(parent)
-        self.state = state
-        layout = QtWidgets.QVBoxLayout(self)
+class ProjectTab:
+    def __init__(self, app):
+        self.app = app
+        self.state = app.state
+        self.popups = app.popups
+        self.sources = SelectTable("proj_sources", ["id", "file", "kind", "size", "fps", "frames",
+                                                    "flips", "seek check", "detections CSV"])
+        self.models = SelectTable("proj_models", ["id", "file", "sha256", "adapter", "options"])
+        st = self.state
+        st.projectChanged.connect(self.refresh)
+        st.adapterChanged.connect(self.refresh_model_status)
+        st.tasks.busyChanged.connect(self._busy)
+        st.tasks.finished.connect(self._task_done)
+        st.tasks.failed.connect(self._task_failed)
 
-        top = QtWidgets.QHBoxLayout()
-        self.project_label = QtWidgets.QLabel(project_name(None))
-        self.project_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        b_new = QtWidgets.QPushButton("New project...")
-        b_open = QtWidgets.QPushButton("Open project...")
-        self.b_save = QtWidgets.QPushButton("Save")
-        b_new.clicked.connect(self.new_project)
-        b_open.clicked.connect(self.open_project)
-        self.b_save.clicked.connect(self.save)
-        top.addWidget(QtWidgets.QLabel("<b>Project:</b>"))
-        top.addWidget(self.project_label, 1)
-        for b in (b_new, b_open, self.b_save):
-            top.addWidget(b)
-        layout.addLayout(top)
+    # -- building --------------------------------------------------------------
 
-        # -- sources -----------------------------------------------------
-        src_box = QtWidgets.QGroupBox("Videos and images")
-        sl = QtWidgets.QVBoxLayout(src_box)
-        self.sources = table(["id", "file", "kind", "size", "fps", "frames", "flips", "seek check",
-                              "detections CSV"])
-        sl.addWidget(self.sources)
-        row = QtWidgets.QHBoxLayout()
-        self.b_add_src = QtWidgets.QPushButton("Add video / image...")
-        self.v_flip = QtWidgets.QCheckBox("v_flip")
-        self.h_flip = QtWidgets.QCheckBox("h_flip")
-        for w in (self.v_flip, self.h_flip):
-            w.setToolTip("Flip frames as YORU did before detecting. YORU's CSV files do not record this.")
-        self.b_seek = QtWidgets.QPushButton("Check seeking")
-        self.b_seek.setToolTip("Compare seeked frames with frames decoded in order on 5 samples")
-        self.b_csv = QtWidgets.QPushButton("Attach YORU detections CSV...")
-        self.b_csv_events = QtWidgets.QPushButton("Events from CSV...")
-        self.b_csv_events.setToolTip("Add the attached CSV's detections as events (filtered by class). "
-                                     "A run finds each box again on its frame or reports it.")
-        self.b_verify = QtWidgets.QPushButton("Verify files")
-        self.b_add_src.clicked.connect(self.add_source)
-        self.b_seek.clicked.connect(self.check_seeking)
-        self.b_csv.clicked.connect(self.attach_csv)
-        self.b_csv_events.clicked.connect(self.events_from_csv)
-        self.b_verify.clicked.connect(self.verify)
-        for w in (self.b_add_src, self.v_flip, self.h_flip, self.b_seek, self.b_csv, self.b_csv_events,
-                  self.b_verify):
-            row.addWidget(w)
-        row.addStretch(1)
-        sl.addLayout(row)
-        layout.addWidget(src_box, 1)
+    def build(self) -> None:
+        themes = self.app.themes
+        with dpg.group(horizontal=True):
+            t = dpg.add_text("Project:")
+            dpg.bind_item_theme(t, themes.header)
+            dpg.add_input_text(tag="proj_name", default_value=project_name(None), readonly=True,
+                               width=-380)
+            dpg.add_button(label="New project...", callback=lambda: self.new_project())
+            dpg.add_button(label="Open project...", callback=lambda: self.open_project())
+            dpg.add_button(label="Save", tag="proj_save", width=60, callback=lambda: self.save())
+        dpg.add_spacer(height=4)
 
-        # -- models ------------------------------------------------------
-        mdl_box = QtWidgets.QGroupBox("Models")
-        ml = QtWidgets.QVBoxLayout(mdl_box)
-        self.models = table(["id", "file", "sha256", "adapter", "options"])
-        ml.addWidget(self.models)
-        row = QtWidgets.QHBoxLayout()
-        self.b_add_model = QtWidgets.QPushButton("Add YOLOv5 model...")
-        self.b_add_toy = QtWidgets.QPushButton("Add synthetic test model")
-        self.b_add_toy.setToolTip("A detector of red/green squares with known answers, for validating "
-                                  "the pipeline. Not a model of animals.")
-        self.conf = QtWidgets.QDoubleSpinBox()
-        self.conf.setRange(0.01, 0.99)
-        self.conf.setSingleStep(0.05)
-        self.conf.setValue(0.25)
-        self.conf.setToolTip("Confidence threshold. Above 0.25 it is applied after NMS, as YORU does.")
-        self.iou = QtWidgets.QDoubleSpinBox()
-        self.iou.setRange(0.05, 0.95)
-        self.iou.setSingleStep(0.05)
-        self.iou.setValue(0.45)
-        self.channel = QtWidgets.QComboBox()
-        self.channel.addItems(["YORU setting (YORU_YOLOV5_RGB)", "BGR (YORU v1)", "RGB"])
-        self.b_add_model.clicked.connect(self.add_model)
-        self.b_add_toy.clicked.connect(self.add_toy)
-        for w in (self.b_add_model, self.b_add_toy, QtWidgets.QLabel("conf"), self.conf,
-                  QtWidgets.QLabel("IoU"), self.iou, QtWidgets.QLabel("channels"), self.channel):
-            row.addWidget(w)
-        row.addStretch(1)
-        ml.addLayout(row)
-        row2 = QtWidgets.QHBoxLayout()
-        self.b_load = QtWidgets.QPushButton("Load selected model")
-        self.b_load.clicked.connect(self.load_model)
-        self.model_status = QtWidgets.QLabel("No model loaded.")
-        self.model_status.setWordWrap(True)
-        row2.addWidget(self.b_load)
-        row2.addWidget(self.model_status, 1)
-        ml.addLayout(row2)
-        layout.addWidget(mdl_box, 1)
+        widgets.heading("Videos and images", themes)
+        self.sources.build()
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Add video / image...", callback=lambda: self.add_source())
+            for tag, label in (("proj_vflip", "v_flip"), ("proj_hflip", "h_flip")):
+                c = dpg.add_checkbox(label=label, tag=tag)
+                tooltip(c, "Flip frames as YORU did before detecting. YORU's CSV files do not "
+                           "record this.")
+            b = dpg.add_button(label="Check seeking", tag="proj_seek",
+                               callback=lambda: self.check_seeking())
+            tooltip(b, "Compare seeked frames with frames decoded in order on 5 samples")
+            dpg.add_button(label="Attach YORU detections CSV...", callback=lambda: self.attach_csv())
+            b = dpg.add_button(label="Events from CSV...", callback=lambda: self.events_from_csv())
+            tooltip(b, "Add the attached CSV's detections as events (filtered by class). A run "
+                       "finds each box again on its frame or reports it.")
+            dpg.add_button(label="Verify files", callback=lambda: self.verify())
+        dpg.add_spacer(height=8)
 
-        state.projectChanged.connect(self.refresh)
-        state.adapterChanged.connect(self.refresh_model_status)
-        state.tasks.busyChanged.connect(self._busy)
-        state.tasks.finished.connect(self._task_done)
-        state.tasks.failed.connect(self._task_failed)
+        widgets.heading("Models", themes)
+        self.models.build()
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Add YOLOv5 model...", callback=lambda: self.add_model())
+            b = dpg.add_button(label="Add synthetic test model", callback=lambda: self.add_toy())
+            tooltip(b, "A detector of red/green squares with known answers, for validating the "
+                       "pipeline. Not a model of animals.")
+            dpg.add_text("conf")
+            c = dpg.add_input_float(tag="proj_conf", default_value=0.25, min_value=0.01,
+                                    max_value=0.99, min_clamped=True, max_clamped=True,
+                                    step=0.05, format="%.2f", width=110)
+            tooltip(c, "Confidence threshold. Above 0.25 it is applied after NMS, as YORU does.")
+            dpg.add_text("IoU")
+            dpg.add_input_float(tag="proj_iou", default_value=0.45, min_value=0.05, max_value=0.95,
+                                min_clamped=True, max_clamped=True, step=0.05, format="%.2f",
+                                width=110)
+            dpg.add_text("channels")
+            dpg.add_combo(list(CHANNELS), tag="proj_channel", default_value=CHANNELS[0], width=260)
+        with dpg.group(horizontal=True):
+            b = dpg.add_button(label="Load selected model", tag="proj_load",
+                               callback=lambda: self.load_model())
+            dpg.bind_item_theme(b, themes.primary_button)
+            dpg.add_text("No model loaded.", tag="proj_model_status", wrap=900)
         self.refresh()
 
-    # -- project ---------------------------------------------------------
+    def layout(self, width: int, height: int) -> None:
+        table_h = max(90, (height - 230) // 2)
+        dpg.configure_item(self.sources.tag, height=table_h)
+        dpg.configure_item(self.models.tag, height=table_h)
+        dpg.configure_item("proj_model_status", wrap=max(200, width - 220))
+
+    # -- project ---------------------------------------------------------------
 
     def new_project(self):
         from yoru_explain.io.project import Project
 
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "New project folder (empty or new)")
+        d = widgets.ask_directory("New project folder (empty or new)")
         if not d:
             return
         try:
             self.state.set_project(Project.create(d))
         except Exception as e:
-            error_box(self, "New project", e)
+            self.popups.error("New project", e)
 
     def open_project(self):
         from yoru_explain.io.project import Project
 
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Open project folder")
+        d = widgets.ask_directory("Open project folder")
         if not d:
             return
         try:
             self.state.set_project(Project.open(d))
         except Exception as e:
-            error_box(self, "Open project", e)
+            self.popups.error("Open project", e)
 
     def save(self):
         try:
             self.state.save_project()
         except Exception as e:
-            error_box(self, "Save project", e)
+            self.popups.error("Save project", e)
 
     def _need_project(self):
         if self.state.project is None:
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Create or open a project first.")
+            self.popups.message("YORU-Explain", "Create or open a project first.")
             return None
         return self.state.project
 
-    # -- sources ---------------------------------------------------------
+    # -- sources ---------------------------------------------------------------
 
-    def add_source(self):
+    def add_source(self, files=None):
         p = self._need_project()
         if p is None:
             return
-        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Add videos or images", "", VIDEO_FILTER)
+        if files is None:
+            files = widgets.ask_open_files("Add videos or images", widgets.VIDEO_TYPES)
         try:
             for f in files:
-                p.add_source(f, v_flip=self.v_flip.isChecked(), h_flip=self.h_flip.isChecked())
+                p.add_source(f, v_flip=bool(dpg.get_value("proj_vflip")),
+                             h_flip=bool(dpg.get_value("proj_hflip")))
             p.save()
         except Exception as e:
-            error_box(self, "Add source", e)
-        self.refresh()
+            self.popups.error("Add source", e)
+        self.state.projectChanged.emit()   # Explore lists the new source too
 
     def check_seeking(self):
         p = self._need_project()
-        sel = selected_data(self.sources)
-        if p is None or not sel:
+        sel = self.sources.selected
+        if p is None:
+            return
+        if not sel:
+            self.popups.message("YORU-Explain", "Select a video first.")
             return
 
         def work(source_id):
@@ -174,15 +161,17 @@ class ProjectTab(QtWidgets.QWidget):
                 return source_id, r.check_seeking()
 
         if not self.state.tasks.submit("check_seeking", work, sel[0]):
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Another task is running.")
+            self.popups.message("YORU-Explain", "Another task is running.")
 
-    def attach_csv(self):
+    def attach_csv(self, path=None):
         p = self._need_project()
-        sel = selected_data(self.sources)
-        if p is None or not sel:
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Select a video first.")
+        sel = self.sources.selected
+        if p is None:
             return
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "YORU detections CSV", "", "CSV (*.csv)")
+        if not sel:
+            self.popups.message("YORU-Explain", "Select a video first.")
+            return
+        f = path or widgets.ask_open_file("YORU detections CSV", widgets.CSV_TYPES)
         if not f:
             return
         try:
@@ -195,82 +184,85 @@ class ProjectTab(QtWidgets.QWidget):
             s.setdefault("detections_files", []).append(entry)
             p.save()
         except Exception as e:
-            error_box(self, "Attach detections", e)
-        self.refresh()
+            self.popups.error("Attach detections", e)
+        self.state.projectChanged.emit()   # Explore draws the CSV's boxes too
 
     def events_from_csv(self):
-        from yoru_explain import api
-
         p = self._need_project()
-        sel = selected_data(self.sources)
-        if p is None or not sel:
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Select a video first.")
+        sel = self.sources.selected
+        if p is None:
+            return
+        if not sel:
+            self.popups.message("YORU-Explain", "Select a video first.")
             return
         s = p.source(sel[0])
-        files = s.get("detections_files", [])
-        if not files:
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Attach a detections CSV first.")
+        if not s.get("detections_files"):
+            self.popups.message("YORU-Explain", "Attach a detections CSV first.")
             return
-        classes, ok = QtWidgets.QInputDialog.getText(
-            self, "Events from CSV", "Classes to keep (comma-separated; empty = all):")
-        if not ok:
-            return
-        limit, ok = QtWidgets.QInputDialog.getInt(self, "Events from CSV", "At most this many events:",
-                                                  100, 1, 1_000_000)
-        if not ok:
-            return
-        names = [c.strip() for c in classes.split(",") if c.strip()] or None
+        self.popups.form("Events from CSV",
+                         [("classes", "Classes to keep (comma-separated; empty = all):", ""),
+                          ("limit", "At most this many events:", 100)],
+                         lambda v: self.add_csv_events(s["source_id"], v["classes"], v["limit"]),
+                         ok="Add events")
+
+    def add_csv_events(self, source_id: str, classes: str, limit: int):
+        from yoru_explain import api
+
+        p = self.state.project
+        s = p.source(source_id)
+        limit = max(1, int(limit))
+        names = [c.strip() for c in str(classes).split(",") if c.strip()] or None
         try:
             added = []
-            for entry in files:
+            for entry in s.get("detections_files", []):
                 added += api.add_events_from_detections_csv(
-                    p, s["source_id"], entry["path"], model_id=self.state.model_id or "",
+                    p, source_id, entry["path"], model_id=self.state.model_id or "",
                     class_names=names, limit=limit - len(added))
                 if len(added) >= limit:
                     break
             p.save()
         except Exception as e:
-            error_box(self, "Events from CSV", e)
+            self.popups.error("Events from CSV", e)
             return
         self.state.eventsChanged.emit()
-        QtWidgets.QMessageBox.information(self, "Events from CSV", f"{len(added)} event(s) added.")
+        self.popups.message("Events from CSV", f"{len(added)} event(s) added.")
 
     def verify(self):
         p = self._need_project()
         if p is None:
             return
+        from yoru_explain.core.hashing import sha256_file
+
         lines = []
         for s in p.sources:
             lines.append(f"{s['source_id']}: {p.verify_source(s['source_id'])['status']}  {s['path']}")
-        from yoru_explain.core.hashing import sha256_file
-
         for m in p.models:
             if m.sha256 == "synthetic":
                 lines.append(f"{m.model_id}: synthetic")
                 continue
             ok = Path(m.path).is_file() and sha256_file(m.path) == m.sha256
             lines.append(f"{m.model_id}: {'ok' if ok else 'missing or changed'}  {m.path}")
-        QtWidgets.QMessageBox.information(self, "Files", "\n".join(lines) or "Nothing to verify.")
+        self.popups.message("Files", "\n".join(lines) or "Nothing to verify.")
 
-    # -- models ----------------------------------------------------------
+    # -- models ------------------------------------------------------------------
 
     def _options(self):
-        rgb = {0: None, 1: False, 2: True}[self.channel.currentIndex()]
-        return {"conf_thresh": round(self.conf.value(), 4), "iou_thresh": round(self.iou.value(), 4),
-                "rgb_input": rgb}
+        rgb = {0: None, 1: False, 2: True}[CHANNELS.index(dpg.get_value("proj_channel"))]
+        return {"conf_thresh": round(float(dpg.get_value("proj_conf")), 4),
+                "iou_thresh": round(float(dpg.get_value("proj_iou")), 4), "rgb_input": rgb}
 
-    def add_model(self):
+    def add_model(self, path=None):
         p = self._need_project()
         if p is None:
             return
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "YOLOv5 checkpoint", "", "PyTorch (*.pt)")
+        f = path or widgets.ask_open_file("YOLOv5 checkpoint", widgets.MODEL_TYPES)
         if not f:
             return
         try:
             p.add_model(f, "yoru-yolov5", self._options())
             p.save()
         except Exception as e:
-            error_box(self, "Add model", e)
+            self.popups.error("Add model", e)
         self.refresh()
 
     def add_toy(self):
@@ -283,14 +275,14 @@ class ProjectTab(QtWidgets.QWidget):
 
     def load_model(self):
         p = self._need_project()
-        sel = selected_data(self.models)
         if p is None:
             return
+        sel = self.models.selected
         if not sel:
             if len(p.models) == 1:
                 sel = [p.models[0].model_id]
             else:
-                QtWidgets.QMessageBox.information(self, "YORU-Explain", "Select a model first.")
+                self.popups.message("YORU-Explain", "Select a model first.")
                 return
         record = p.model(sel[0])
         device = self.state.device
@@ -304,31 +296,31 @@ class ProjectTab(QtWidgets.QWidget):
                                                      **dict(record.options))
 
         if not self.state.tasks.submit("load_model", work):
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Another task is running.")
+            self.popups.message("YORU-Explain", "Another task is running.")
             return
-        self.model_status.setText(f"Loading {record.model_id}...")
+        dpg.set_value("proj_model_status", f"Loading {record.model_id}...")
 
     def refresh_model_status(self):
         a = self.state.adapter
         if a is None:
-            self.model_status.setText("No model loaded.")
+            dpg.set_value("proj_model_status", "No model loaded.")
             return
         info = a.model_info()
         caps = a.capabilities
         grad = "Grad-CAM available" if caps.gradients else f"Grad-CAM unavailable ({caps.gradients_reason})"
-        self.model_status.setText(
-            f"<b>{self.state.model_id}</b> loaded: {a.name} on {info.get('device')}, "
-            f"{info.get('channel_order', '')}; classes {info.get('class_names')}; {grad}; "
-            f"batch-invariant: {caps.batch_invariant} (max diff {caps.batch_max_abs_diff})")
+        dpg.set_value("proj_model_status",
+                      f"{self.state.model_id} loaded: {a.name} on {info.get('device')}, "
+                      f"{info.get('channel_order', '')}; classes {info.get('class_names')}; {grad}; "
+                      f"batch-invariant: {caps.batch_invariant} (max diff {caps.batch_max_abs_diff})")
 
-    # -- refresh ---------------------------------------------------------
+    # -- refresh -------------------------------------------------------------------
 
     def refresh(self):
         p = self.state.project
-        self.project_label.setText(project_name(p))
+        dpg.set_value("proj_name", project_name(p))
         if p is None:
-            fill_table(self.sources, [])
-            fill_table(self.models, [])
+            self.sources.set_rows([])
+            self.models.set_rows([])
             return
         rows, ids = [], []
         for s in p.sources:
@@ -339,16 +331,16 @@ class ProjectTab(QtWidgets.QWidget):
                          ("v" if s["v_flip"] else "") + ("h" if s["h_flip"] else "") or "-",
                          seek.get("status", ""), csvs])
             ids.append(s["source_id"])
-        fill_table(self.sources, rows, data=ids)
+        self.sources.set_rows(rows, ids)
         mrows, mids = [], []
         for m in p.models:
             mrows.append([m.model_id, short(m.path), m.sha256[:12], m.adapter, dict(m.options)])
             mids.append(m.model_id)
-        fill_table(self.models, mrows, data=mids)
+        self.models.set_rows(mrows, mids)
 
     def _busy(self, busy):
-        for b in (self.b_load, self.b_seek):
-            b.setEnabled(not busy)
+        for tag in ("proj_load", "proj_seek"):
+            dpg.configure_item(tag, enabled=not busy)
 
     def _task_done(self, name, result):
         if name == "load_model":
@@ -360,13 +352,14 @@ class ProjectTab(QtWidgets.QWidget):
             self.state.project.save()
             self.refresh()
             if check.get("status") == "failed":
-                QtWidgets.QMessageBox.warning(
-                    self, "Seeking", f"Seeking is not exact for this video (frames {check['mismatched']}). "
+                self.popups.message(
+                    "Seeking", f"Seeking is not exact for this video (frames {check['mismatched']}). "
                     "YORU-Explain reads analysed frames in order and verifies seeks by presentation "
-                    "time, so results are not affected; plain seeking would show wrong frames.")
+                    "time, so results are not affected; plain seeking would show wrong frames.",
+                    kind="warning")
 
     def _task_failed(self, name, text, exc):
         if name in ("load_model", "check_seeking"):
             if name == "load_model":
-                self.model_status.setText("Loading failed.")
-            error_box(self, name.replace("_", " ").capitalize(), exc)
+                dpg.set_value("proj_model_status", "Loading failed.")
+            self.popups.error(name.replace("_", " ").capitalize(), exc)

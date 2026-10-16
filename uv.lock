@@ -1679,9 +1679,9 @@ name = "yoru-explain"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dearpygui" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pyqt5" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torchvision", version = "0.26.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -1696,9 +1696,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dearpygui" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pyqt5", specifier = ">=5.15" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },

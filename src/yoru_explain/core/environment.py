@@ -19,6 +19,16 @@ def _version(module_name: str, attr: str = "__version__") -> Optional[str]:
     return str(getattr(module, attr, None) or "unknown")
 
 
+def _dist_version(distribution: str) -> Optional[str]:
+    """An installed distribution's version, without importing it (a GUI toolkit)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version(distribution)
+    except PackageNotFoundError:
+        return None
+
+
 def git_commit(path) -> Optional[str]:
     """The commit a git checkout containing *path* is at, read from ``.git``.
 
@@ -70,7 +80,7 @@ def software_versions() -> Dict[str, Optional[str]]:
         "torch": _version("torch"),
         "torchvision": _version("torchvision"),
         "yoru": _version("yoru"),
-        "pyqt5": _version("PyQt5.QtCore", "PYQT_VERSION_STR"),
+        "dearpygui": _dist_version("dearpygui"),
     }
     try:
         import yoru

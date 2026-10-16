@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) YORU contributors — see LICENSE for details.
 
-"""The PyQt5 GUI.  It only displays and dispatches; analysis lives in the core.
+"""The DearPyGui GUI.  It only displays and dispatches; analysis lives in the core.
 
-torch is imported here, before any PyQt5 module, on purpose.  On Windows,
-importing PyQt5 loads its own copy of the MSVC runtime
-(``PyQt5/Qt5/bin/MSVCP140.dll``, older than torch's), and a torch imported
-afterwards fails with WinError 1114 in ``c10.dll`` (measured with PyQt5-Qt5
-5.15.2 and torch 2.11).  Every GUI module is under this package, so importing
-any of them goes through this line first.
+The window shell (screen-fitted viewport, Japanese-capable font, the Window
+menu) and the base theme are YORU's documented GUI primitives
+(``yoru.gui_layout.GuiSession``, ``yoru.gui_base.apply_default_theme``), as in
+YORU-Tracker; the screens are YORU-Explain's own.
+
+Every DearPyGui callback runs on the render thread, from the loop in
+:func:`yoru_explain.gui.main_window.run` (manual callback management), so
+the tabs touch items without locks.  Long work runs on the threads of
+:mod:`yoru_explain.gui.worker`, which the loop polls once per frame.
+
+Unlike PyQt5, DearPyGui and tkinter can be imported before torch on Windows
+(checked with DearPyGui 1.11.1 and torch 2.11), so no import order is imposed.
 """
-
-import torch  # noqa: F401  (must precede PyQt5; see above)

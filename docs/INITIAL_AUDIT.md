@@ -115,6 +115,11 @@ reproduce is reported (`target_not_reproduced`), never analysed.
 
 ## 6. GUI framework
 
+> **Revised 2026-10-17:** at the user's request the GUI was rebuilt with
+> DearPyGui, like YORU and YORU-Tracker, on YORU's documented GUI primitives
+> (`GuiSession`, `apply_default_theme`). The PyQt5 assessment below is kept
+> as it was made.
+
 PyQt5, as the plan proposes. Checked:
 
 * YORU's own windows and YORU-Tracker use DearPyGui; PyQt5 is already a YORU

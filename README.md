@@ -23,7 +23,7 @@ the wing is a measurement, not a failure. See [docs/VALIDATION.md](docs/VALIDATI
 |---|---|---|---|
 | Purpose | detection, closed loop | identity, trajectories | why a detection scores as it does |
 | Launch | `python -m yoru` | `python -m yoru_tracker` | `python -m yoru_explain` |
-| GUI | DearPyGui | DearPyGui | PyQt5 |
+| GUI | DearPyGui | DearPyGui | DearPyGui |
 
 ## What is measured, exactly
 
@@ -72,7 +72,7 @@ Without the sibling checkout, install YORU first and then this package
 local path.
 
 Verified on Windows 11, Python 3.10.22, torch 2.11.0+cu128 (RTX 5060 Ti and
-CPU), PyQt5 5.15.11. Other platforms are untested.
+CPU), DearPyGui 1.11.1. Other platforms are untested.
 
 ## Use
 
@@ -80,12 +80,16 @@ CPU), PyQt5 5.15.11. Other platforms are untested.
 
 1. *Project* — create a project folder, add videos/images (with YORU's
    `v_flip`/`h_flip` if they were used), add a model, *Load selected model*.
-   Optionally attach a YORU detections CSV: its boxes are shown dashed, and
+   Optionally attach a YORU detections CSV: its boxes are shown in light blue, and
    *Events from CSV...* turns them into events in bulk (each is found again
    with the loaded model before it is analysed).
-2. *Explore* — move to a frame; the loaded model's detections are drawn.
-   Click a box, *Add selected as event*. Results of an event are shown as
-   Original / Heatmap / Overlay / Side by side.
+2. *Explore* — move to a frame (slider, `<` `>`, or the arrow keys); the
+   loaded model's detections are drawn on the frame, whose axes are frame
+   pixels (wheel zooms, drag pans, double-click fits). Click a box, *Add
+   selected as event*. Ctrl/Shift-click selects several events; double-click
+   one to go to its frame. Results of an event are shown as Original / Heatmap
+   / Overlay / Side by side, with the colour scale and the map's value under
+   the mouse.
 3. *Analyze* — choose occlusion or Grad-CAM and the score, run the selected or
    all events. Progress, cancel and the log are on the right; nothing blocks
    the window.
@@ -137,8 +141,9 @@ Videos and weights are referenced by path and hash, never copied.
   and on a fly test model trained here with YORU's training script, on CUDA
   and CPU. It is **not** verified on the YORU paper's models (not available
   here). Every run repeats the check on its first frame.
-* 144 tests (synthetic known-answer tests, real-model integration, offscreen
-  GUI); see [docs/VALIDATION.md](docs/VALIDATION.md) for what they establish.
+* 152 tests (synthetic known-answer tests, real-model integration, the GUI
+  in process), plus a real-window test with `YORU_EXPLAIN_GUI_WINDOW=1`; see
+  [docs/VALIDATION.md](docs/VALIDATION.md) for what they establish.
 * Next: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Logs: `~/.yoru/logs/yoru_explain.log`, beside YORU's (`YORU_HOME` moves both).
@@ -146,4 +151,4 @@ Logs: `~/.yoru/logs/yoru_explain.log`, beside YORU's (`YORU_HOME` moves both).
 ## Licence
 
 AGPL-3.0-or-later (it runs YORU's AGPL code, including the bundled YOLOv5, in
-process). PyQt5 is GPL v3.
+process). DearPyGui is MIT.

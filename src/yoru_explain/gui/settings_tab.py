@@ -7,84 +7,78 @@ from __future__ import annotations
 
 import json
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+import dearpygui.dearpygui as dpg
 
-from yoru_explain.gui.qtutil import error_box
-from yoru_explain.gui.state import AppState
+from yoru_explain.gui import widgets
+from yoru_explain.gui.widgets import tooltip
 
 
-class SettingsTab(QtWidgets.QWidget):
-    def __init__(self, state: AppState, analyze_tab, parent=None):
-        super().__init__(parent)
-        self.state = state
+class SettingsTab:
+    def __init__(self, app, analyze_tab):
+        self.app = app
+        self.state = app.state
+        self.popups = app.popups
         self.analyze = analyze_tab
-        layout = QtWidgets.QVBoxLayout(self)
+        self.state.adapterChanged.connect(self.refresh)
 
-        dev = QtWidgets.QGroupBox("Compute device (used when a model is loaded)")
-        dl = QtWidgets.QHBoxLayout(dev)
-        self.device = QtWidgets.QComboBox()
-        self.device.addItems(["auto", "cuda", "cpu"])
-        self.device.setToolTip("auto follows YORU: $YORU_DEVICE, else CUDA, else CPU. Scores differ "
-                               "slightly between devices (fp16 autocast on CUDA), so runs record it.")
-        self.device.currentTextChanged.connect(self._device)
-        dl.addWidget(self.device)
-        dl.addStretch(1)
-        layout.addWidget(dev)
-
-        logs = QtWidgets.QGroupBox("Logs")
-        ll = QtWidgets.QHBoxLayout(logs)
+    def build(self) -> None:
         from yoru_explain.core.logs import log_file
 
-        self.log_path = QtWidgets.QLineEdit(str(log_file()))
-        self.log_path.setReadOnly(True)
-        b_logs = QtWidgets.QPushButton("Open log folder")
-        b_logs.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(
-            QtCore.QUrl.fromLocalFile(str(log_file().parent))))
-        ll.addWidget(self.log_path, 1)
-        ll.addWidget(b_logs)
-        layout.addWidget(logs)
+        themes = self.app.themes
+        widgets.heading("Compute device (used when a model is loaded)", themes)
+        c = dpg.add_combo(["auto", "cuda", "cpu"], tag="set_device", default_value=self.state.device,
+                          width=160, callback=lambda s, v: self._device(v))
+        tooltip(c, "auto follows YORU: $YORU_DEVICE, else CUDA, else CPU. Scores differ slightly "
+                   "between devices (fp16 autocast on CUDA), so runs record it.")
+        dpg.add_spacer(height=6)
 
-        cfg = QtWidgets.QGroupBox("Analysis settings file (JSON)")
-        cl = QtWidgets.QHBoxLayout(cfg)
-        b_export = QtWidgets.QPushButton("Export current settings...")
-        b_import = QtWidgets.QPushButton("Import settings...")
-        b_export.clicked.connect(self.export_settings)
-        b_import.clicked.connect(self.import_settings)
-        cl.addWidget(b_export)
-        cl.addWidget(b_import)
-        cl.addStretch(1)
-        layout.addWidget(cfg)
+        widgets.heading("Logs", themes)
+        with dpg.group(horizontal=True):
+            dpg.add_input_text(tag="set_log_path", default_value=str(log_file()), readonly=True,
+                               width=-180)
+            dpg.add_button(label="Open log folder", callback=lambda: self._open_logs())
+        dpg.add_spacer(height=6)
 
-        info = QtWidgets.QGroupBox("Versions, adapters and the loaded model")
-        il = QtWidgets.QVBoxLayout(info)
-        self.text = QtWidgets.QPlainTextEdit()
-        self.text.setReadOnly(True)
-        il.addWidget(self.text)
-        b_refresh = QtWidgets.QPushButton("Refresh")
-        b_refresh.clicked.connect(self.refresh)
-        il.addWidget(b_refresh)
-        layout.addWidget(info, 1)
-        state.adapterChanged.connect(self.refresh)
+        widgets.heading("Analysis settings file (JSON)", themes)
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Export current settings...", callback=lambda: self.export_settings())
+            dpg.add_button(label="Import settings...", callback=lambda: self.import_settings())
+        dpg.add_spacer(height=6)
+
+        widgets.heading("Versions, adapters and the loaded model", themes)
+        dpg.add_input_text(tag="set_info", multiline=True, readonly=True, width=-1, height=300)
+        dpg.add_button(label="Refresh", callback=lambda: self.refresh())
         self.refresh()
+
+    def layout(self, width: int, height: int) -> None:
+        dpg.configure_item("set_info", height=max(150, height - 300))
 
     def _device(self, text):
         self.state.device = text
 
-    def export_settings(self):
-        f, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export analysis settings", "analysis.json",
-                                                     "JSON (*.json)")
+    def _open_logs(self):
+        from yoru_explain.core.logs import log_file
+
+        try:
+            widgets.open_folder(log_file().parent)
+        except Exception as e:
+            self.popups.error("Open log folder", e)
+
+    def export_settings(self, path=None):
+        f = path or widgets.ask_save_file("Export analysis settings", widgets.JSON_TYPES, ".json",
+                                          initial_file="analysis.json")
         if not f:
             return
         try:
             with open(f, "w", encoding="utf-8") as fh:
                 json.dump(self.analyze.request().to_dict(), fh, indent=2)
         except Exception as e:
-            error_box(self, "Export settings", e)
+            self.popups.error("Export settings", e)
 
-    def import_settings(self):
+    def import_settings(self, path=None):
         from yoru_explain.core.pipeline import AnalysisRequest
 
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import analysis settings", "", "JSON (*.json)")
+        f = path or widgets.ask_open_file("Import analysis settings", widgets.JSON_TYPES)
         if not f:
             return
         try:
@@ -94,9 +88,9 @@ class SettingsTab(QtWidgets.QWidget):
             req = AnalysisRequest.from_dict(data.get("request", data))
             self.state.requestImported.emit(req)
         except Exception as e:
-            error_box(self, "Import settings", e)
+            self.popups.error("Import settings", e)
 
-    def refresh(self):
+    def info_text(self) -> str:
         from yoru_explain.core.environment import hardware, software_versions
         from yoru_explain.core.registry import UNSUPPORTED, list_adapters
         from yoru_explain.io.schema import SCHEMA_VERSION
@@ -113,4 +107,7 @@ class SettingsTab(QtWidgets.QWidget):
             lines += ["", f"loaded model ({self.state.model_id}):",
                       json.dumps(a.model_info(), indent=2, default=str),
                       "capabilities:", json.dumps(a.capabilities.to_dict(), indent=2)]
-        self.text.setPlainText("\n".join(lines))
+        return "\n".join(lines)
+
+    def refresh(self):
+        dpg.set_value("set_info", self.info_text())

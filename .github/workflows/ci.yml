@@ -61,5 +61,5 @@ jobs:
           curl -sSL --retry 3 -o .cache/models/yolov5s.pt \
             https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt
 
-      - name: Tests (unit, integration, offscreen GUI)
+      - name: Tests (unit, integration, in-process GUI)
         run: uv run pytest

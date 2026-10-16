@@ -5,17 +5,11 @@ from pathlib import Path
 
 import pytest
 
-# Qt widgets in the GUI tests render offscreen; set before anything imports Qt.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 # Logs of test runs (ours and YORU's) go to a throwaway YORU_HOME, not the
 # user's ~/.yoru/logs.
 import tempfile  # noqa: E402
 
 os.environ["YORU_HOME"] = tempfile.mkdtemp(prefix="yoru_explain_tests_")
-
-# On Windows torch must be imported before PyQt5 (src/yoru_explain/gui/__init__.py).
-import torch  # noqa: E402,F401
 
 REPO = Path(__file__).resolve().parents[1]
 MODELS = REPO / ".cache" / "models"

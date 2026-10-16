@@ -126,8 +126,8 @@ Python 3.10.22, torch 2.11.0+cu128, RTX 5060 Ti; about 25 s).
 | Failure handling | changed frame hash, box not on the frame, missing video, cancellation, identity failure | `frame_mismatch`, `target_not_reproduced`, `missing_data`, `cancelled` rows; the run continues with the next event; no map, no number |
 | Frames | `tests/unit/test_frames.py` | in-order numbering from 0; seeks verified by presentation time equal in-order frames; flips; non-ASCII paths |
 | CPU only | CUDA reported missing | whole core runs on CPU; YOLOv5 autocast disabled |
-| GUI | `tests/gui` offscreen | model loads on a worker; click selects; analysis runs while the event loop keeps ticking (no gap > 1 s); cancel; views; `python -m yoru_explain` starts |
-| Boundary | `tests/unit/test_yoru_boundary.py` | YORU internals only in `adapters/_yoru.py`; YORU never imports yoru_explain; no argparse; the core imports without torch or Qt |
+| GUI | `tests/gui`, the DearPyGui window built in process (no viewport) | model loads on a worker; click selects; analysis runs while the loop keeps ticking (no tick > 0.5 s); cancel; views and colour scale; settings export/import; a failing callback is reported, not fatal; popups open one at a time; quitting during a task asks and waits; only the latest frame request is decoded. With `YORU_EXPLAIN_GUI_WINDOW=1`: `python -m yoru_explain` opens a real window and saves a screenshot |
+| Boundary | `tests/unit/test_yoru_boundary.py` | YORU internals only in `adapters/_yoru.py`; YORU never imports yoru_explain; no argparse; the core imports without torch or a GUI toolkit; DearPyGui/tkinter only in `gui/`, no Qt |
 
 ### Measured on YORU's test video (fly fixture model, CUDA, 32×32 patches, stride 16, context ×3, black)
 
@@ -181,8 +181,9 @@ and each has a regression test:
   verifies where each seek landed.
 * **Windows: torch must be imported before PyQt5.** PyQt5-Qt5 5.15.2 loads
   its own, older `MSVCP140.dll`; a torch imported afterwards fails with
-  WinError 1114 in `c10.dll`. `yoru_explain.gui` imports torch first. Any
-  process that imports both (YORU included) has the same constraint.
+  WinError 1114 in `c10.dll`. Any process that imports both (YORU included)
+  has the same constraint. YORU-Explain's GUI no longer uses PyQt5; DearPyGui
+  and tkinter imported before torch were checked not to break it.
 
 ## 4. Reading results responsibly
 

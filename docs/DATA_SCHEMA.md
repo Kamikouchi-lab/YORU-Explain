@@ -67,7 +67,7 @@ One row per detection chosen for explanation.
 | `status` | `running` (while it runs — or the process was killed), `completed` (every event has a row; see `events` for how many failed), `cancelled`, `failed` (identity check failed, or the run itself was interrupted by an error) |
 | `method`, `method_kind` | |
 | `project` | `{name, root}` |
-| `software` | versions of yoru_explain, python, numpy, opencv, torch, torchvision, yoru, pyqt5, and the git commits of the YORU and YORU-Explain checkouts |
+| `software` | versions of yoru_explain, python, numpy, opencv, torch, torchvision, yoru, dearpygui (pyqt5 in runs made with the PyQt5 GUI), and the git commits of the YORU and YORU-Explain checkouts |
 | `hardware` | platform, CUDA/cuDNN versions, `cudnn_benchmark`, `cudnn_deterministic`, GPU names |
 | `adapter` | `{name, version, capabilities}`; capabilities hold the measured `deterministic`, `batch_invariant`, `batch_max_abs_diff`, and the gradient probe's verdict |
 | `model` | `model_id` + the adapter's `model_info()`: weights path, `sha256`, class names, strides, thresholds (`conf_thresh`, `nms_conf`, `iou_thresh`, `max_det`), channel order, device, precision, YORU version, bundled YOLOv5 path |
