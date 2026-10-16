@@ -158,7 +158,8 @@ and pinned by `tests/unit/test_yoru_boundary.py`:
 Because these can change without notice, every run checks the adapter
 against `get_detector(...).detect()` on its first frame and records the
 result in `manifest.json`. A proposal to document them in YORU is in
-`docs/YORU_PR_PROPOSAL.md`; YORU itself is not changed.
+`docs/YORU_PR_PROPOSAL.md`. It was opened as Kamikouchi-lab/YORU#43 on
+2026-10-17; it changes YORU's docs and tests only.
 
 YORU never imports `yoru_explain` (checked by the same test), and YORU's GUI
 gets no branches for it.
@@ -177,8 +178,8 @@ gets no branches for it.
    Which to make the lab default is a scientific choice.
 4. Whether `ambiguous` re-detection matches (two same-class boxes over the
    target) should count in maps; v0.1 excludes them and counts them.
-5. Should the YORU names in section 8 become documented external API (see the
-   proposal), or should YORU-Explain keep pinning them?
+5. ~~Should the YORU names in section 8 become documented external API?~~ —
+   proposed to YORU on 2026-10-17 as Kamikouchi-lab/YORU#43 (awaiting review).
 6. YOAKE's inference contract (single frame vs. track history) before a v0.4
    adapter.
 

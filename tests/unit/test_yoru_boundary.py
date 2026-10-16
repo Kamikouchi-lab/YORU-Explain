@@ -2,7 +2,8 @@
 
 * Documented YORU names (YORU's docs/external_api.md) may be used anywhere.
 * YORU's YOLOv5 internals are used in ``adapters/_yoru.py`` only -- the list
-  in docs/INITIAL_AUDIT.md section 8 and docs/YORU_PR_PROPOSAL.md.
+  in docs/INITIAL_AUDIT.md section 8.  Kamikouchi-lab/YORU#43 proposes
+  documenting them; move them to DOCUMENTED once it is merged.
 * YORU never imports YORU-Explain.
 * No argparse; no torch in the core that GUI-less tools import.
 """

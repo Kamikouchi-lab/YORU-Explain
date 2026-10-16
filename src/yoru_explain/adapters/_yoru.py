@@ -23,8 +23,8 @@ and, through ``yolov5_importable``, the bundled YOLOv5's ``letterbox``,
 breaks one import with a clear message instead of an analysis.  Because they
 can change, every run also checks the adapter against YORU's documented
 ``get_detector(...).detect()`` (see ``YoruYolov5Adapter.identity_check``).
-``tests/unit/test_yoru_boundary.py`` pins this list; ``docs/YORU_PR_PROPOSAL.md``
-proposes documenting it in YORU.
+``tests/unit/test_yoru_boundary.py`` pins this list.  Kamikouchi-lab/YORU#43
+proposes documenting it in YORU (``docs/YORU_PR_PROPOSAL.md``).
 """
 
 from __future__ import annotations

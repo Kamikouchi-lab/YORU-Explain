@@ -63,5 +63,5 @@ reproducible run folders, 144 tests. What follows is concrete work, in order.
 
 * CI on Windows like YORU-Tracker's (YORU checked out beside, `uv sync
   --locked`, pytest; download `yolov5s.pt` for the integration tests).
-* If YORU documents the YOLOv5 entry points (docs/YORU_PR_PROPOSAL.md),
+* Once YORU documents the YOLOv5 entry points (Kamikouchi-lab/YORU#43),
   move `adapters/_yoru.py` to the documented names and drop the internal list.

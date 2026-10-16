@@ -35,8 +35,9 @@ the definitions are in `docs/VALIDATION.md`, the files in `docs/DATA_SCHEMA.md`.
 
 ## The boundary with YORU
 
-- YORU is not modified from here. Needed changes go into a proposal
-  (`docs/YORU_PR_PROPOSAL.md`), never into ../YORU.
+- YORU changes only through pull requests to Kamikouchi-lab/YORU that the
+  user asked for (#43: documenting the YOLOv5 entry points, see
+  `docs/YORU_PR_PROPOSAL.md`). Never edit ../YORU on its own.
 - YORU names outside YORU's `docs/external_api.md` are used only in
   `src/yoru_explain/adapters/_yoru.py`; `tests/unit/test_yoru_boundary.py`
   pins the list. YORU never imports `yoru_explain`.
