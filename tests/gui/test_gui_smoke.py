@@ -88,6 +88,8 @@ def test_the_whole_gui_workflow(qapp, tmp_path):
 
     # Analyze, and keep an eye on the event loop meanwhile.
     an = w.analyze_tab
+    assert an.request().occlusion.baseline.value == (180, 105, 255)   # hot pink by default
+    assert "rgb(255, 105, 180)" in an.colour.styleSheet()                # the swatch shows it
     an.patch.setValue(8)
     an.stride.setValue(4)
     an.region.setCurrentText("full")

@@ -171,7 +171,8 @@ gets no branches for it.
 2. Are the YORU paper models available, and were they run with BGR (v1
    default) or RGB? Identity with YORU is verified here only for `yolov5s.pt`
    and the fixture model.
-3. Default occlusion baseline: black is out of distribution for a
+3. ~~Default occlusion baseline~~ — decided 2026-10-17: hot pink (#FF69B4,
+   BGR 180,105,255). Original note: black is out of distribution for a
    bright-arena video; the 114-grey letterbox value and a blur are offered.
    Which to make the lab default is a scientific choice.
 4. Whether `ambiguous` re-detection matches (two same-class boxes over the

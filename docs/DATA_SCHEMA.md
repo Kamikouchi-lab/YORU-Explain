@@ -55,7 +55,7 @@ One row per detection chosen for explanation.
 |---|---|
 | `schema_version`, `kind` (`yoru-explain-run-config`), `run_id`, `created` | |
 | `request` | the `AnalysisRequest`: `method`, `method_config`, `verify_identity`, `use_cache`, `write_previews`. `AnalysisRequest.from_dict(config["request"])` re-creates it. |
-| `method_config` | occlusion: `method`, `method_kind` (`perturbation_effect`), `method_version`, `patch_size [h, w]`, `stride [y, x]`, `baseline {kind, value [B,G,R], sigma}`, `region` (`context`/`box`/`full`), `context_scale`, `score {score_type, identity_mode, iou_threshold}`, `batch_size`, `seed`, `include_ambiguous`. Grad-CAM: `method`, `method_kind` (`attribution`), `method_version`, `layer`, `score_type`, `identity_mode` (always `fixed_candidate`), `precision`, `score_tolerance`. |
+| `method_config` | occlusion: `method`, `method_kind` (`perturbation_effect`), `method_version`, `patch_size [h, w]`, `stride [y, x]`, `baseline {kind, value [B,G,R], sigma}` (default `constant` `[180, 105, 255]`, hot pink #FF69B4; older runs keep the colour they recorded), `region` (`context`/`box`/`full`), `context_scale`, `score {score_type, identity_mode, iou_threshold}`, `batch_size`, `seed`, `include_ambiguous`. Grad-CAM: `method`, `method_kind` (`attribution`), `method_version`, `layer`, `score_type`, `identity_mode` (always `fixed_candidate`), `precision`, `score_tolerance`. |
 | `score_types`, `identity_modes` | the definitions of every score type and identity mode, in words |
 | `model_id`, `model_options`, `adapter`, `adapter_version`, `events`, `frame_access`, `seed` | |
 

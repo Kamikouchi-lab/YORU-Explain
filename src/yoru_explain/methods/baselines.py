@@ -11,6 +11,11 @@ result -- it is written into every run's ``config.json``, its description
 into ``manifest.json``, and each patch's actual pixel change into
 ``perturbations.csv`` (a patch whose pixels did not change cannot have an
 effect, whatever its delta says).
+
+The default is a constant hot pink (CSS ``hotpink``, #FF69B4), the lab's
+choice.  Like any constant colour it is out of distribution; it is also
+strongly red, and a fly's eyes are red, so compare it with another baseline
+before reading much into a small effect.
 """
 
 from __future__ import annotations
@@ -20,9 +25,19 @@ from typing import Any, Dict, Mapping, Tuple
 
 import numpy as np
 
+#: The default baseline colour, CSS ``hotpink`` (#FF69B4), in OpenCV's BGR order.
+HOT_PINK: Tuple[int, int, int] = (180, 105, 255)
+
+#: Names printed for well-known constant colours (BGR).
+NAMED_COLOURS: Dict[Tuple[int, int, int], str] = {
+    HOT_PINK: "hot pink #FF69B4",
+    (0, 0, 0): "black",
+    (114, 114, 114): "YOLOv5 letterbox grey",
+}
+
 BASELINE_KINDS: Dict[str, str] = {
-    "constant": "every occluded pixel set to one BGR colour (value); (0,0,0) is black, "
-                "(114,114,114) YOLOv5's letterbox grey",
+    "constant": "every occluded pixel set to one BGR colour (value); the default (180,105,255) is "
+                "hot pink #FF69B4, (0,0,0) black, (114,114,114) YOLOv5's letterbox grey",
     "image_mean": "the frame's mean colour",
     "patch_mean": "the occluded region's own mean colour: removes texture, keeps colour",
     "blur": "the same region of a Gaussian-blurred frame (sigma): removes detail, keeps colour",
@@ -33,8 +48,8 @@ BASELINE_KINDS: Dict[str, str] = {
 @dataclass(frozen=True)
 class BaselineSpec:
     kind: str = "constant"
-    #: ``constant``: BGR colour.
-    value: Tuple[int, int, int] = (0, 0, 0)
+    #: ``constant``: BGR colour; hot pink unless set.
+    value: Tuple[int, int, int] = HOT_PINK
     #: ``blur``: Gaussian sigma in pixels.
     sigma: float = 8.0
 
@@ -48,7 +63,9 @@ class BaselineSpec:
 
     def describe(self) -> str:
         if self.kind == "constant":
-            return f"constant BGR {tuple(int(v) for v in self.value)}"
+            value = tuple(int(v) for v in self.value)
+            name = NAMED_COLOURS.get(value)
+            return f"constant BGR {value}" + (f" ({name})" if name else "")
         if self.kind == "blur":
             return f"Gaussian blur, sigma {float(self.sigma):g} px"
         return self.kind.replace("_", " ")
@@ -61,8 +78,10 @@ class BaselineSpec:
         unknown = set(d) - {"kind", "value", "sigma"}
         if unknown:
             raise ValueError(f"unknown baseline keys: {sorted(unknown)}")
+        # Every config written records its value, so an older run's colour
+        # (black, before hot pink became the default) is read back as it was.
         return cls(kind=str(d.get("kind", "constant")),
-                   value=tuple(int(v) for v in d.get("value", (0, 0, 0))),
+                   value=tuple(int(v) for v in d.get("value", HOT_PINK)),
                    sigma=float(d.get("sigma", 8.0)))
 
 

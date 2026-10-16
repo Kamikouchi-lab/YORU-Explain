@@ -46,7 +46,8 @@ of one class it would follow whichever is stronger.
 Occlusion: `delta(R) = s_ref − s(frame with R replaced)`, signs kept; the map is
 the mean delta of the patches covering each pixel, NaN where none was scored.
 `s_ref` is taken at the run's batch size, because the detector's scores depend
-on it (measured). Other scores: `cls_prob`, `obj_prob`, `cls_logit`,
+on it (measured). The default baseline is a constant hot pink (#FF69B4); black,
+grey, the frame or patch mean, a blur and seeded noise are the alternatives. Other scores: `cls_prob`, `obj_prob`, `cls_logit`,
 `obj_logit`. Definitions and their limits: [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Install
@@ -136,7 +137,7 @@ Videos and weights are referenced by path and hash, never copied.
   and on a fly test model trained here with YORU's training script, on CUDA
   and CPU. It is **not** verified on the YORU paper's models (not available
   here). Every run repeats the check on its first frame.
-* 143 tests (synthetic known-answer tests, real-model integration, offscreen
+* 144 tests (synthetic known-answer tests, real-model integration, offscreen
   GUI); see [docs/VALIDATION.md](docs/VALIDATION.md) for what they establish.
 * Next: [docs/ROADMAP.md](docs/ROADMAP.md).
 

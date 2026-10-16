@@ -2,7 +2,7 @@
 
 v0.1 (this release): YOLOv5 adapter identical to YORU, fixed-candidate and
 re-detection scoring, occlusion with controls, verified Grad-CAM, PyQt5 GUI,
-reproducible run folders, 143 tests. What follows is concrete work, in order.
+reproducible run folders, 144 tests. What follows is concrete work, in order.
 
 ## v0.2 — validity of the explanations
 

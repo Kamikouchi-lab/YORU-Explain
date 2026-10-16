@@ -50,7 +50,8 @@ For a rectangle `R` replaced by a baseline `b`:
 * Signs are kept: `Δ > 0` — hiding R lowers the score; `Δ < 0` — raises it.
 * Controls with every target: `noop` (the unchanged frame through the same
   batch pipeline; must give Δ = 0) and `full_region` (the whole region replaced).
-* Baselines: `constant` (black, YOLOv5 grey 114, any colour), `image_mean`,
+* Baselines: `constant` (**default: hot pink #FF69B4**, BGR `(180, 105, 255)`, the
+  lab's choice of 2026-10-17; black, YOLOv5 grey 114, any colour), `image_mean`,
   `patch_mean`, `blur` (σ), `noise` (seeded per patch). Each patch's real
   pixel change is recorded; a patch that changes no pixel cannot have an effect.
 
@@ -77,7 +78,9 @@ a code and no map.
 * **One model, one number.** Both methods describe the score of one candidate
   of one model. They are not evidence about the animal.
 * **Baseline dependence.** Occlusion edits the image into something the model
-  never saw (black over a bright arena is extreme). The effect depends on the
+  never saw (black over a bright arena is extreme; the default hot pink is
+  strongly red, and a fly's eyes are red, so a pink patch may add eye-like
+  evidence as well as hide what it covers). The effect depends on the
   baseline, the patch size and the stride; compare settings before drawing
   conclusions (v0.2 adds systematic comparisons).
 * **Fixed vs re-detection answer different questions.** Fixed-candidate asks
@@ -107,7 +110,7 @@ a code and no map.
 
 ## 3. What was verified
 
-`uv run pytest` — 143 tests, all passing on 2026-10-17 (Windows 11,
+`uv run pytest` — 144 tests, all passing on 2026-10-17 (Windows 11,
 Python 3.10.22, torch 2.11.0+cu128, RTX 5060 Ti; about 25 s).
 
 | Area | How | Result |
@@ -135,6 +138,20 @@ Python 3.10.22, torch 2.11.0+cu128, RTX 5060 Ti; about 25 s).
 | ev-0003 | 6450 | copulation 0.8959 | 528 | 0.523 | 0.029 / 0.0019 | 2 | 3 | 0.074 | 0.999 |
 
 Time per event: 2.7–3.7 s at batch 1, 1.4–1.9 s at batch 8 (CUDA).
+
+The same events with the default **hot pink** baseline instead of black
+(2026-10-17, otherwise identical settings):
+
+| Event | Black: largest Δ / mean Δ in box | Hot pink: largest Δ / mean Δ in box |
+|---|---|---|
+| solo, frame 150 | 0.146 / 0.022 | 0.132 / 0.013 |
+| copulation, frame 6450 | 0.523 / 0.029 | **0.055** / 0.0066 |
+
+Hiding the copulating pair with pink patches lowers the score about ten
+times less than hiding it with black, though the largest effects sit in the
+same place; replacing the whole region kills the detection with either
+colour (score < 1e-5). Effects of this size depend on the baseline, so a
+figure should name it and, for a claim, show more than one.
 These describe the fixture model's score; they are not findings about flies.
 The fixture model was trained here on 900 frames of the same video it is
 tested on.

@@ -18,7 +18,7 @@ from PyQt5 import QtCore, QtWidgets
 from yoru_explain.core.types import IDENTITY_MODES, SCORE_TYPES
 from yoru_explain.gui.qtutil import QtLogHandler, error_box, fill_table, fmt, form_row, table
 from yoru_explain.gui.state import AppState
-from yoru_explain.methods.baselines import BASELINE_KINDS
+from yoru_explain.methods.baselines import BASELINE_KINDS, HOT_PINK
 
 
 class AnalyzeTab(QtWidgets.QWidget):
@@ -78,8 +78,16 @@ class AnalyzeTab(QtWidgets.QWidget):
         for k, v in BASELINE_KINDS.items():
             self.baseline.addItem(k, k)
             self.baseline.setItemData(self.baseline.count() - 1, v, QtCore.Qt.ToolTipRole)
-        self.value = QtWidgets.QLineEdit("0,0,0")
-        self.value.setToolTip("constant baseline: B,G,R (0,0,0 black; 114,114,114 YOLOv5 grey)")
+        self.value = QtWidgets.QLineEdit(",".join(str(v) for v in HOT_PINK))
+        self.value.setToolTip("constant baseline: B,G,R. Default 180,105,255 = hot pink #FF69B4; "
+                              "0,0,0 black; 114,114,114 YOLOv5 grey")
+        self.colour = QtWidgets.QPushButton("Colour...")
+        self.colour.setToolTip("Pick the constant baseline colour")
+        value_box = QtWidgets.QWidget()
+        value_row = QtWidgets.QHBoxLayout(value_box)
+        value_row.setContentsMargins(0, 0, 0, 0)
+        value_row.addWidget(self.value, 1)
+        value_row.addWidget(self.colour)
         self.sigma = QtWidgets.QDoubleSpinBox()
         self.sigma.setRange(0.5, 100)
         self.sigma.setValue(8.0)
@@ -97,7 +105,10 @@ class AnalyzeTab(QtWidgets.QWidget):
         form_row(ol, "patch (px)", self.patch, "Square patch size in frame pixels")
         form_row(ol, "stride (px)", self.stride)
         form_row(ol, "baseline", self.baseline, "What an occluded region is replaced with")
-        form_row(ol, "value (B,G,R)", self.value)
+        form_row(ol, "value (B,G,R)", value_box)
+        self.colour.clicked.connect(self._pick_colour)
+        self.value.textChanged.connect(self._show_colour)
+        self._show_colour()
         form_row(ol, "blur sigma", self.sigma)
         form_row(ol, "region", self.region, "context: box scaled by the factor; box; full frame")
         form_row(ol, "context x", self.context)
@@ -187,6 +198,34 @@ class AnalyzeTab(QtWidgets.QWidget):
         self._adapter_changed()
         self._method_changed()
         self._score_help()
+
+    # -- the baseline colour -------------------------------------------------
+
+    def _bgr(self):
+        """The B,G,R typed in the value field, or None if it is not three 0..255 numbers."""
+        try:
+            bgr = tuple(int(v) for v in self.value.text().replace(" ", "").split(","))
+        except ValueError:
+            return None
+        return bgr if len(bgr) == 3 and all(0 <= v <= 255 for v in bgr) else None
+
+    def _show_colour(self):
+        bgr = self._bgr()
+        if bgr is None:
+            self.colour.setStyleSheet("")
+            return
+        b, g, r = bgr
+        text = "#000000" if 0.299 * r + 0.587 * g + 0.114 * b > 140 else "#ffffff"
+        self.colour.setStyleSheet(f"background-color: rgb({r}, {g}, {b}); color: {text};")
+
+    def _pick_colour(self):
+        from PyQt5 import QtGui
+
+        b, g, r = self._bgr() or HOT_PINK
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(r, g, b), self, "Baseline colour")
+        if c.isValid():
+            self.value.setText(f"{c.blue()},{c.green()},{c.red()}")
+            self.baseline.setCurrentIndex(self.baseline.findData("constant"))
 
     # -- the request ---------------------------------------------------------
 

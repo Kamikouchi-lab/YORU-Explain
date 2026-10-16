@@ -26,7 +26,8 @@ CONFIG = {
     # As in YORU: conf 0.25, IoU 0.45, channel order from YORU_YOLOV5_RGB (BGR by default).
     "model_options": {"conf_thresh": 0.25, "iou_thresh": 0.45, "rgb_input": None},
     "occlusion": {"patch_size": [32, 32], "stride": [16, 16], "region": "context", "context_scale": 3.0,
-                  "baseline": {"kind": "constant", "value": [0, 0, 0], "sigma": 8.0},
+                  # The default: hot pink #FF69B4, in OpenCV's B,G,R order.
+                  "baseline": {"kind": "constant", "value": [180, 105, 255], "sigma": 8.0},
                   "score": {"score_type": "obj_x_cls", "identity_mode": "fixed_candidate",
                             "iou_threshold": 0.5},
                   "batch_size": 1, "seed": 0},

@@ -11,7 +11,10 @@ import numpy as np
 
 from tests import synthetic as syn
 from yoru_explain.core.types import ScoreDefinition
+from yoru_explain.methods.baselines import BaselineSpec
 from yoru_explain.methods.occlusion import OcclusionConfig, run_occlusion
+
+BLACK = BaselineSpec("constant", value=(0, 0, 0))
 
 A = syn.window(5, 5)          # (72, 72, 104, 104)
 B = syn.window(5, 13)         # (200, 72, 232, 104), same class
@@ -34,7 +37,8 @@ def _scores(toy, target, images, mode, iou_threshold=0.5):
 def test_occluding_a_lowers_as_score_even_though_b_still_scores_high(toy):
     frame = _two_reds()
     target = syn.target_on(toy, frame, A)
-    r = run_occlusion(toy, frame, target, OcclusionConfig(patch_size=16, stride=16, region="full"))
+    r = run_occlusion(toy, frame, target, OcclusionConfig(patch_size=16, stride=16, region="full",
+                                                          baseline=BLACK))
     assert r.ok
     over_a = [p for p in r.patches if syn.overlaps(p.patch.box, A)]
     assert all(p.delta > 0 for p in over_a)
@@ -91,7 +95,8 @@ def test_occlusion_maps_count_only_scored_patches(toy):
     frame = _two_reds()
     target = syn.target_on(toy, frame, A)
     r = run_occlusion(toy, frame, target, OcclusionConfig(
-        patch_size=32, stride=8, region="context", score=ScoreDefinition(identity_mode="redetect")))
+        patch_size=32, stride=8, region="context", baseline=BLACK,
+        score=ScoreDefinition(identity_mode="redetect")))
     statuses = {p.score.status for p in r.patches}
     assert "disappeared" in statuses and "matched" in statuses
     lost = [p for p in r.patches if not p.counted]
@@ -103,7 +108,6 @@ def test_occlusion_maps_count_only_scored_patches(toy):
 
 def test_ambiguous_patches_have_no_score_unless_asked(toy):
     from yoru_explain.io.runs import perturbation_rows
-    from yoru_explain.methods.baselines import BaselineSpec
 
     frame = syn.blank()
     syn.paint(frame, A, syn.RED)

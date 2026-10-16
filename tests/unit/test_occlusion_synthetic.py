@@ -21,6 +21,9 @@ from yoru_explain.methods.occlusion import (
     run_occlusion,
 )
 
+#: Tests about *hiding* something say so: black, not the (pink) default.
+BLACK = BaselineSpec("constant", value=(0, 0, 0))
+
 
 def _noisy_frame(seed=0):
     rng = np.random.default_rng(seed)
@@ -69,7 +72,7 @@ def test_hiding_suppressing_evidence_gives_a_negative_delta(toy):
     x0, y0, x1, y1 = syn.window(5, 5)
     syn.paint(frame, (x0, y0, x1, y1), syn.RED)
     syn.paint(frame, (x1 - 4, y0, x1, y1), syn.GREEN)  # a green stripe inside the window
-    r = _run(toy, frame, patch_size=4, stride=4, region="box")
+    r = _run(toy, frame, patch_size=4, stride=4, region="box", baseline=BLACK)
     assert r.ok, r.message
     green = [p for p in r.patches if p.patch.box[0] >= x1 - 4]
     red = [p for p in r.patches if p.patch.box[2] <= x1 - 4]
@@ -82,7 +85,7 @@ def test_hiding_suppressing_evidence_gives_a_negative_delta(toy):
 def test_a_patch_that_changes_no_pixel_has_no_effect(toy):
     frame = syn.blank()
     syn.paint(frame, syn.window(5, 5), syn.RED)
-    r = _run(toy, frame, patch_size=16, stride=16, region="full")
+    r = _run(toy, frame, patch_size=16, stride=16, region="full", baseline=BLACK)
     flat = [p for p in r.patches if p.pixel_change == 0.0]
     assert flat and all(p.delta == 0.0 for p in flat)
 
@@ -118,7 +121,7 @@ def test_every_baseline_runs_and_is_recorded(toy, kind):
 def test_redetection_reports_a_lost_target_as_lost_not_zero(toy):
     frame = syn.blank()
     syn.paint(frame, syn.window(5, 5), syn.RED)
-    r = _run(toy, frame, patch_size=32, stride=8, region="context",
+    r = _run(toy, frame, patch_size=32, stride=8, region="context", baseline=BLACK,
              score=ScoreDefinition(identity_mode="redetect"))
     assert r.ok
     covering = [p for p in r.patches if p.patch.box == syn.window(5, 5)]
@@ -173,3 +176,20 @@ def test_cancelling_stops_without_a_map(toy):
     r = run_occlusion(toy, frame, target, OcclusionConfig(patch_size=8, stride=4),
                       cancel=lambda: len(calls) > 2, progress=lambda d, t: calls.append(d))
     assert r.status == "cancelled" and r.error_code == "cancelled" and r.delta_map is None
+
+
+def test_the_default_baseline_is_hot_pink(toy):
+    from yoru_explain.methods.baselines import HOT_PINK, Baseline
+
+    spec = OcclusionConfig().baseline
+    assert spec.kind == "constant" and spec.value == HOT_PINK == (180, 105, 255)
+    assert "hot pink #FF69B4" in spec.describe()
+    frame = syn.blank()
+    out = frame.copy()
+    Baseline(spec, frame).fill(out, 0, 4, 0, 4, 0)
+    assert out[0, 0].tolist() == [180, 105, 255]          # BGR: RGB (255, 105, 180)
+    r = _run(toy, _noisy_frame(), patch_size=16, stride=16)
+    assert r.ok and r.config.to_dict()["baseline"]["value"] == [180, 105, 255]
+    # A config written before the default changed keeps its own colour.
+    old = dict(OcclusionConfig().to_dict(), baseline={"kind": "constant", "value": [0, 0, 0], "sigma": 8.0})
+    assert OcclusionConfig.from_dict(old).baseline == BLACK
