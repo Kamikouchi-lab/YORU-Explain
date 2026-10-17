@@ -24,7 +24,7 @@ from yoru_explain.methods.baselines import BASELINE_KINDS, HOT_PINK
 
 OCCLUSION = "Occlusion sensitivity (perturbation effect)"
 GRADCAM = "Grad-CAM (attribution; verified models only)"
-LAYER_AUTO = "auto (Detect input at the candidate's level)"
+LAYER_AUTO = "auto (the feature map the candidate's score is computed from)"
 REGIONS = ("context", "box", "full")
 SETTINGS_W = 440
 
@@ -102,8 +102,9 @@ class AnalyzeTab:
             c = dpg.add_combo(list(IDENTITY_MODES), tag="ana_identity",
                               default_value=next(iter(IDENTITY_MODES)), width=-1,
                               callback=lambda: self._score_help())
-            tooltip(c, "fixed_candidate: the same pre-NMS candidate on every input. redetect: run "
-                       "NMS and match by class and IoU; no score when the match fails.")
+            tooltip(c, "fixed_candidate: the same pre-NMS candidate on every input (models whose "
+                       "candidates are fixed slots). redetect: run the detector end to end and match by "
+                       "class and IoU; no score when the match fails.")
         with dpg.group(horizontal=True):
             dpg.add_text("match IoU")
             c = dpg.add_input_float(tag="ana_iou", default_value=0.5, min_value=0.05, max_value=1.0,
@@ -159,7 +160,9 @@ class AnalyzeTab:
             with dpg.group(horizontal=True):
                 dpg.add_text("layer    ")
                 c = dpg.add_combo([LAYER_AUTO], tag="ana_layer", default_value=LAYER_AUTO, width=-1)
-                tooltip(c, "auto: the Detect input at the candidate's level")
+                tooltip(c, "auto: YOLO: the detection head's input at the candidate's level; RT-DETR: "
+                           "the decoder input of the query's encoder token; Faster R-CNN: the FPN level "
+                           "its proposal is pooled from; SSD: the feature map of its default box")
             with dpg.group(horizontal=True):
                 dpg.add_text("precision")
                 c = dpg.add_combo(["inference", "fp32"], tag="ana_precision",
@@ -308,6 +311,7 @@ class AnalyzeTab:
             dpg.set_value("ana_cam_reason", "Load a model to see whether Grad-CAM is available for it.")
             dpg.bind_item_theme("ana_cam_reason", themes.muted)
             dpg.configure_item("ana_score", items=list(SCORE_TYPES))
+            dpg.configure_item("ana_identity", items=list(IDENTITY_MODES))
         else:
             caps = a.capabilities
             if caps.gradients:
@@ -327,6 +331,10 @@ class AnalyzeTab:
             dpg.configure_item("ana_score", items=scores)
             if dpg.get_value("ana_score") not in scores and scores:
                 dpg.set_value("ana_score", scores[0])
+            modes = list(getattr(caps, "identity_modes", IDENTITY_MODES))
+            dpg.configure_item("ana_identity", items=modes)
+            if dpg.get_value("ana_identity") not in modes and modes:
+                dpg.set_value("ana_identity", modes[0])
         dpg.configure_item("ana_layer", items=self._layer_labels)
         if dpg.get_value("ana_layer") not in self._layer_labels:
             dpg.set_value("ana_layer", LAYER_AUTO)
@@ -336,14 +344,25 @@ class AnalyzeTab:
     def gradcam_offered(self) -> bool:
         return GRADCAM in dpg.get_item_configuration("ana_method")["items"]
 
+    def _identity_modes(self) -> List[str]:
+        a = self.state.adapter
+        if a is None:
+            return list(IDENTITY_MODES)
+        return list(getattr(a.capabilities, "identity_modes", IDENTITY_MODES))
+
     def _method_changed(self):
         occ = self.method() == "occlusion"
         dpg.configure_item("ana_occ", show=occ)
         dpg.configure_item("ana_cam", show=not occ)
-        dpg.configure_item("ana_identity", enabled=occ)
-        dpg.configure_item("ana_iou", enabled=occ)
+        modes = self._identity_modes()
+        # Grad-CAM differentiates the target's own candidate on its own frame.
+        dpg.configure_item("ana_identity", enabled=occ and len(modes) > 1,
+                           items=modes if occ else ["fixed_candidate"])
+        dpg.configure_item("ana_iou", enabled=occ and "redetect" in modes)
         if not occ:
             dpg.set_value("ana_identity", "fixed_candidate")
+        elif dpg.get_value("ana_identity") not in modes and modes:
+            dpg.set_value("ana_identity", modes[0])
         self._score_help()
 
     def _score_help(self):
@@ -352,8 +371,12 @@ class AnalyzeTab:
         mode = dpg.get_value("ana_identity") if occ else "fixed_candidate"
         kind = ("Perturbation effect: score change when a region is replaced by the baseline."
                 if occ else "Attribution: gradient-weighted feature map of the score (Grad-CAM).")
-        dpg.set_value("ana_score_help", f"{kind}\n{SCORE_TYPES.get(st, '')}\n"
-                                        f"{IDENTITY_MODES.get(mode, '')}\nNot a biological interpretation.")
+        a = self.state.adapter
+        what = a.describe_score_type(st) if a is not None and hasattr(a, "describe_score_type") \
+            else SCORE_TYPES.get(st, "")
+        mode_text = IDENTITY_MODES.get(mode, "") if occ else "the target's own candidate, on its own frame"
+        dpg.set_value("ana_score_help", f"{kind}\n{st}: {what}\n{mode_text}\n"
+                                        "Not a biological interpretation.")
 
     def _busy(self, busy):
         dpg.configure_item("ana_run_sel", enabled=not busy)

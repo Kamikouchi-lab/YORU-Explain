@@ -12,6 +12,7 @@ hash -- for analysis.
 
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -336,14 +337,16 @@ class ExploreTab:
     def _fill_detections(self):
         rows = []
         for i, d in enumerate(self.detections):
-            rows.append([i, d.class_name, f"{d.score:.4f}",
-                         ", ".join(f"{v:.1f}" for v in d.box),
+            box = ", ".join(f"{v:.1f}" for v in d.box)
+            if d.obb is not None:
+                box += f"  (rotated {math.degrees(d.obb[4]):.1f} deg)"
+            rows.append([i, d.class_name, f"{d.score:.4f}", box,
                          d.candidate.describe() if d.candidate else "-"])
         self.det_table.set_rows(rows, list(range(len(rows))))
         self.det_table.select([self.selected] if self.selected is not None else [])
 
     def _clicked(self, x, y):
-        i = pick_box([d.box for d in self.detections], x, y)
+        i = pick_box([d.box for d in self.detections], x, y, obbs=[d.obb for d in self.detections])
         if i is not None:
             self.selected = i
             self.det_table.select([i])
@@ -465,7 +468,7 @@ class ExploreTab:
         self.set_index(t.frame.frame_index)
 
     def _match_pending(self):
-        from yoru_explain.core.geometry import iou
+        from yoru_explain.core.geometry import overlap
 
         t = self._pending_select
         if t is None or self.frame is None or t.frame.frame_index != self.frame.frame_index:
@@ -474,7 +477,7 @@ class ExploreTab:
         for i, d in enumerate(self.detections):
             if d.class_id != t.detection.class_id:
                 continue
-            v = iou(d.box, t.box)
+            v = overlap(d.box, t.box, d.obb, t.obb)
             if best is None or v > best[0]:
                 best = (v, i)
         return best[1] if best and best[0] >= 0.5 else None
@@ -587,8 +590,10 @@ class ExploreTab:
         imported = []
         s = self._current_source()
         if s is not None:
-            imported = [x.detection.box for x in self._imported.get(s["source_id"], {}).get(f.frame_index, [])]
-        self.view.set_boxes(boxes, selected=self.selected, labels=labels, dashed=imported)
+            imported = [x.detection for x in self._imported.get(s["source_id"], {}).get(f.frame_index, [])]
+        self.view.set_boxes(boxes, selected=self.selected, labels=labels,
+                            dashed=[d.box for d in imported], obbs=[d.obb for d in self.detections],
+                            dashed_obbs=[d.obb for d in imported])
 
     def _show_scale(self, kind: str, vrange) -> None:
         visible = vrange is not None

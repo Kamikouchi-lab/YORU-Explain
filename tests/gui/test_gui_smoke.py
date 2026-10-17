@@ -19,6 +19,7 @@ import time
 
 import cv2
 import dearpygui.dearpygui as dpg
+import numpy as np
 import pytest
 
 from tests import synthetic as syn
@@ -364,6 +365,164 @@ def test_only_the_latest_frame_request_is_served(tmp_path):
     assert [f.request.index for f in frames] == [1, 4]
     assert frames[1].frame.frame_index == 4 and frames[1].error is None
     fs.shutdown()
+
+
+def test_models_are_added_with_the_adapter_for_their_backend(app, tmp_path):
+    import zipfile
+
+    from yoru_explain.gui.project_tab import BACKENDS
+    from yoru_explain.io.project import Project
+
+    app.state.set_project(Project.create(tmp_path / "proj"))
+    files = {}
+    for name in ("flies_rtdetr.pt", "flies.onnx", "best.pt", "other.onnx"):
+        files[name] = tmp_path / name
+        files[name].write_bytes(name.encode())          # unreadable: YORU decides by the name
+    v1 = tmp_path / "renamed_v1_model.pt"               # a YOLOv5 checkpoint, by its pickle
+    with zipfile.ZipFile(v1, "w") as zf:
+        zf.writestr("archive/data.pkl", b"\x80\x02cmodels.yolo\nDetectionModel\n")
+    tab = app.project_tab
+    for f in (files["flies_rtdetr.pt"], files["flies.onnx"], v1):
+        tab.add_model(str(f))                           # type: auto
+    dpg.set_value("proj_backend", BACKENDS["ultralytics"])
+    tab.add_model(str(files["best.pt"]))
+    dpg.set_value("proj_blackbox", True)
+    dpg.set_value("proj_backend", BACKENDS["auto"])
+    tab.add_model(str(files["other.onnx"]))
+    models = app.state.project.models
+    assert [m.adapter for m in models] == ["yoru-rtdetr", "yoru-onnx", "yoru-yolov5", "yoru-ultralytics",
+                                           "yoru-detector"]
+    assert "rgb_input" in models[2].options and "rgb_input" not in models[0].options
+    assert models[4].options["backend"] == "onnx"
+    assert tab.models.row_count == 5 and not errors(app)
+
+
+class _RedetectOnly:
+    """What an RT-DETR / Faster R-CNN adapter reports: no fixed candidates."""
+
+    name = "fake-rtdetr"
+
+    class capabilities:
+        gradients = True
+        gradients_reason = "probe passed"
+        score_types = ("confidence", "cls_prob")
+        identity_modes = ("redetect",)
+        family = "RT-DETR (test)"
+        candidate_kind = "query"
+        batch_invariant = True
+        batch_max_abs_diff = 0.0
+
+        @staticmethod
+        def to_dict():
+            return {"identity_modes": ["redetect"]}
+
+    @staticmethod
+    def gradient_layers():
+        return []
+
+    @staticmethod
+    def describe_score_type(score_type):
+        return {"confidence": "sigmoid of the query's class logit"}.get(score_type, score_type)
+
+    @staticmethod
+    def model_info():
+        return {"device": "cpu"}
+
+
+def test_a_redetection_only_model_offers_only_redetection(app):
+    an = app.analyze_tab
+    dpg.set_value("ana_identity", "fixed_candidate")
+    app.state.set_adapter(_RedetectOnly(), "m1")
+    assert dpg.get_item_configuration("ana_identity")["items"] == ["redetect"]
+    assert an.request().occlusion.score.identity_mode == "redetect"
+    assert dpg.get_item_configuration("ana_score")["items"] == ["confidence", "cls_prob"]
+    dpg.set_value("ana_score", "confidence")
+    an._score_help()
+    assert "sigmoid of the query's class logit" in dpg.get_value("ana_score_help")
+    an.set_method("gradcam")                     # Grad-CAM: the query on its own frame
+    assert an.request().method == "gradcam" and not errors(app)
+    assert "candidates: query" in dpg.get_value("proj_model_status")
+
+
+def test_a_model_loaded_with_a_warning_says_so(app):
+    adapter = _RedetectOnly()
+    adapter.capabilities = type("Caps", (_RedetectOnly.capabilities,),
+                                {"warnings": ("built for an end-to-end head, run with NMS",)})
+    app.project_tab._task_done("load_model", ("m1", adapter))
+    shown = [p for p in app.popups.shown if p[0] == "warning"]
+    assert shown and "end-to-end head" in shown[-1][2]
+
+
+def test_rotated_boxes_are_drawn_and_picked(app):
+    import math
+
+    from yoru_explain.core.geometry import obb_aabb
+    from yoru_explain.gui.frame_view import pick_box
+
+    rod_a = (100.0, 100.0, 160.0, 10.0, math.pi / 4)
+    rod_b = (100.0, 100.0, 160.0, 10.0, -math.pi / 4)
+    boxes = [obb_aabb(rod_a), obb_aabb(rod_b)]
+    # On rod a, away from where the rods cross: inside both upright boxes, inside rod a only.
+    x, y = 100 + 50 * math.cos(math.pi / 4), 100 + 50 * math.sin(math.pi / 4)
+    assert pick_box(boxes, x, y, obbs=[rod_a, rod_b]) == 0
+    x, y = 100 + 50 * math.cos(-math.pi / 4), 100 + 50 * math.sin(-math.pi / 4)
+    assert pick_box(boxes, x, y, obbs=[rod_a, rod_b]) == 1
+    assert pick_box(boxes, 45, 100, obbs=[rod_a, rod_b], margin=6) is None   # an empty corner
+    assert pick_box(boxes, 45, 100, margin=6) == 0                            # upright: inside both
+    view = app.explore_tab.view
+    view.set_image(np.zeros((200, 200, 3), np.uint8))
+    view.set_boxes(boxes, obbs=[rod_a, rod_b], selected=0)
+    assert view.box_count == 2
+
+
+@pytest.mark.slow
+def test_the_gui_workflow_with_a_rotated_box_model(app, tmp_path):
+    """A real ultralytics OBB model through the window: auto type, rotated boxes, analysis."""
+    from tests.conftest import MODELS
+    from yoru_explain.core.geometry import point_in_obb
+    from yoru_explain.io.project import Project
+
+    weights = MODELS / "yolo11n-obb.pt"
+    ul = pytest.importorskip("ultralytics")
+    if not weights.is_file():
+        pytest.skip("yolo11n-obb.pt not in .cache/models (run tests/prepare_models.py)")
+    image = tmp_path / "bus.png"
+    cv2.imwrite(str(image), cv2.imread(os.path.join(os.path.dirname(ul.__file__), "assets", "bus.jpg")))
+    st = app.state
+    st.set_project(Project.create(tmp_path / "proj"))
+    app.project_tab.add_source([str(image)])
+    app.project_tab.add_model(str(weights))                       # type: auto
+    assert st.project.models[0].adapter == "yoru-ultralytics"
+    app.project_tab.models.select_row(0)
+    app.project_tab.load_model()
+    assert tick_until(app, lambda: st.adapter is not None, timeout=120), errors(app)
+    assert "rotated boxes" in dpg.get_value("proj_model_status")
+
+    ex = app.explore_tab
+    ex.set_index(0)
+    assert tick_until(app, lambda: ex.frame is not None and ex.detections, timeout=60)
+    d = ex.detections[0]
+    assert d.obb is not None and ex.view.box_count == len(ex.detections)
+    cx, cy = d.obb[0], d.obb[1]
+    assert point_in_obb(cx, cy, d.obb)
+    ex._clicked(cx, cy)
+    assert ex.selected == 0
+    ex.add_events(all_on_frame=False)
+    assert st.project.target("ev-0001").obb == pytest.approx(d.obb)
+
+    an = app.analyze_tab
+    assert dpg.get_item_configuration("ana_identity")["items"] == ["fixed_candidate", "redetect"]
+    dpg.set_value("ana_identity", "redetect")
+    dpg.set_value("ana_patch", 128)
+    dpg.set_value("ana_stride", 128)
+    dpg.set_value("ana_region", "box")
+    ex.events.click(0)
+    an.run(selected_only=True)
+    assert tick_until(app, lambda: an.last_run is not None, timeout=300), errors(app)
+    run = an.last_run
+    assert run.status == "completed" and run.counts == {"ok": 1}, run.results
+    assert run.identity_check["exact"]
+    assert run.results[0]["obb_angle"] is not None and not errors(app)
 
 
 @pytest.mark.skipif(os.environ.get("YORU_EXPLAIN_GUI_WINDOW") != "1",

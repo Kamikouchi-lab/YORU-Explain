@@ -15,6 +15,16 @@ from yoru_explain.gui.widgets import SelectTable, short, tooltip
 
 CHANNELS = ("YORU setting (YORU_YOLOV5_RGB)", "BGR (YORU v1)", "RGB")
 
+#: YORU's detector backends (the names of yoru.libs.plugins.get_detector), as offered here.
+BACKENDS = {
+    "auto": "auto (the backend YORU picks for the file)",
+    "yolov5": "yolov5 - YOLOv5 (YORU v1 models)",
+    "ultralytics": "ultralytics - YOLOv8 / YOLO11 / YOLOv5u / YOLOv10 (+ OBB, seg, pose)",
+    "rtdetr": "rtdetr - RT-DETR",
+    "torchvision": "torchvision - Faster R-CNN / Mask R-CNN / SSD",
+    "onnx": "onnx - ONNX exports (YOLOv5 / YOLOv8 / YOLO11)",
+}
+
 
 class ProjectTab:
     def __init__(self, app):
@@ -66,21 +76,33 @@ class ProjectTab:
         widgets.heading("Models", themes)
         self.models.build()
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Add YOLOv5 model...", callback=lambda: self.add_model())
+            dpg.add_text("type")
+            c = dpg.add_combo(list(BACKENDS.values()), tag="proj_backend", default_value=BACKENDS["auto"],
+                              width=440)
+            tooltip(c, "The YORU backend that runs the model. auto: the one YORU's get_detector('auto', ...) "
+                       "picks for the file (a YOLOv5 checkpoint is recognised by its contents, whatever "
+                       "it is called; RT-DETR, YOLOv8 and YOLO11 by their names).")
+            c = dpg.add_checkbox(label="black box", tag="proj_blackbox")
+            tooltip(c, "Explain only what YORU's detect() returns: works for any model YORU loads; "
+                       "re-detection with the reported confidence, no candidates, no Grad-CAM.")
+            dpg.add_button(label="Add model...", callback=lambda: self.add_model())
             b = dpg.add_button(label="Add synthetic test model", callback=lambda: self.add_toy())
             tooltip(b, "A detector of red/green squares with known answers, for validating the "
                        "pipeline. Not a model of animals.")
+        with dpg.group(horizontal=True):
             dpg.add_text("conf")
             c = dpg.add_input_float(tag="proj_conf", default_value=0.25, min_value=0.01,
                                     max_value=0.99, min_clamped=True, max_clamped=True,
                                     step=0.05, format="%.2f", width=110)
-            tooltip(c, "Confidence threshold. Above 0.25 it is applied after NMS, as YORU does.")
+            tooltip(c, "Confidence threshold, as YORU applies it (YOLOv5: above 0.25 after NMS; "
+                       "torchvision: scores strictly above it).")
             dpg.add_text("IoU")
             dpg.add_input_float(tag="proj_iou", default_value=0.45, min_value=0.05, max_value=0.95,
                                 min_clamped=True, max_clamped=True, step=0.05, format="%.2f",
                                 width=110)
-            dpg.add_text("channels")
-            dpg.add_combo(list(CHANNELS), tag="proj_channel", default_value=CHANNELS[0], width=260)
+            dpg.add_text("YOLOv5 channels")
+            c = dpg.add_combo(list(CHANNELS), tag="proj_channel", default_value=CHANNELS[0], width=260)
+            tooltip(c, "YOLOv5 only: YORU's BGR/RGB rule. The other backends convert to RGB themselves.")
         with dpg.group(horizontal=True):
             b = dpg.add_button(label="Load selected model", tag="proj_load",
                                callback=lambda: self.load_model())
@@ -89,7 +111,7 @@ class ProjectTab:
         self.refresh()
 
     def layout(self, width: int, height: int) -> None:
-        table_h = max(90, (height - 230) // 2)
+        table_h = max(90, (height - 262) // 2)
         dpg.configure_item(self.sources.tag, height=table_h)
         dpg.configure_item(self.models.tag, height=table_h)
         dpg.configure_item("proj_model_status", wrap=max(200, width - 220))
@@ -246,20 +268,33 @@ class ProjectTab:
 
     # -- models ------------------------------------------------------------------
 
-    def _options(self):
-        rgb = {0: None, 1: False, 2: True}[CHANNELS.index(dpg.get_value("proj_channel"))]
-        return {"conf_thresh": round(float(dpg.get_value("proj_conf")), 4),
-                "iou_thresh": round(float(dpg.get_value("proj_iou")), 4), "rgb_input": rgb}
+    def backend(self) -> str:
+        """The backend chosen in the type combo (a YORU backend name, or ``auto``)."""
+        label = dpg.get_value("proj_backend")
+        return next((k for k, v in BACKENDS.items() if v == label), "auto")
 
-    def add_model(self, path=None):
+    def _options(self, backend: str = "yolov5"):
+        options = {"conf_thresh": round(float(dpg.get_value("proj_conf")), 4),
+                   "iou_thresh": round(float(dpg.get_value("proj_iou")), 4)}
+        if backend == "yolov5":
+            options["rgb_input"] = {0: None, 1: False, 2: True}[CHANNELS.index(dpg.get_value("proj_channel"))]
+        return options
+
+    def add_model(self, path=None, backend=None, black_box=None):
+        """Register a model file with the adapter for its YORU backend."""
+        from yoru_explain.core.registry import resolve_model
+
         p = self._need_project()
         if p is None:
             return
-        f = path or widgets.ask_open_file("YOLOv5 checkpoint", widgets.MODEL_TYPES)
+        f = path or widgets.ask_open_file("Model file", widgets.MODEL_TYPES)
         if not f:
             return
+        backend = backend or self.backend()
+        black_box = bool(dpg.get_value("proj_blackbox")) if black_box is None else bool(black_box)
         try:
-            p.add_model(f, "yoru-yolov5", self._options())
+            adapter, resolved, extra = resolve_model(f, backend, black_box=black_box)
+            p.add_model(f, adapter, {**self._options(resolved), **extra})
             p.save()
         except Exception as e:
             self.popups.error("Add model", e)
@@ -308,9 +343,13 @@ class ProjectTab:
         info = a.model_info()
         caps = a.capabilities
         grad = "Grad-CAM available" if caps.gradients else f"Grad-CAM unavailable ({caps.gradients_reason})"
+        family = getattr(caps, "family", "") or a.name
+        modes = ", ".join(getattr(caps, "identity_modes", ())) or "-"
+        kind = getattr(caps, "candidate_kind", "")
         dpg.set_value("proj_model_status",
-                      f"{self.state.model_id} loaded: {a.name} on {info.get('device')}, "
-                      f"{info.get('channel_order', '')}; classes {info.get('class_names')}; {grad}; "
+                      f"{self.state.model_id} loaded: {family} ({a.name}) on {info.get('device')}, "
+                      f"{info.get('channel_order', '')}; classes {info.get('class_names')}; "
+                      f"candidates: {kind or 'none (black box)'}; identity modes: {modes}; {grad}; "
                       f"batch-invariant: {caps.batch_invariant} (max diff {caps.batch_max_abs_diff})")
 
     # -- refresh -------------------------------------------------------------------
@@ -346,6 +385,10 @@ class ProjectTab:
         if name == "load_model":
             model_id, adapter = result
             self.state.set_adapter(adapter, model_id)
+            warnings = list(getattr(adapter.capabilities, "warnings", ()) or ())
+            if warnings:
+                self.popups.message("Model loaded, with a warning", "\n\n".join(warnings),
+                                    kind="warning")
         elif name == "check_seeking" and self.state.project is not None:
             source_id, check = result
             self.state.project.source(source_id)["seek_check"] = check

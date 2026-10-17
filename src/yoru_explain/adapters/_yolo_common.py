@@ -21,6 +21,18 @@ from yoru_explain.adapters.base import CandidateReadout, RawOutput
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.geometry import LetterboxTransform
 
+#: The scores of the YOLOv5 layout, the reported confidence first.
+YOLOV5_SCORE_TYPES = ("confidence", "obj_x_cls", "cls_prob", "obj_prob", "cls_logit", "obj_logit")
+YOLOV5_SCORES = (
+    ("confidence", "sigmoid(objectness) x sigmoid(class logit) -- YOLOv5's confidence as YORU "
+                   "reports it (the same number as obj_x_cls)"),
+    ("obj_x_cls", "sigmoid(objectness) x sigmoid(class logit) -- the confidence YOLOv5 reports"),
+    ("cls_prob", "sigmoid(class logit) -- class probability given an object"),
+    ("obj_prob", "sigmoid(objectness) -- object probability, class-agnostic"),
+    ("cls_logit", "class logit, before the sigmoid"),
+    ("obj_logit", "objectness logit, before the sigmoid"),
+)
+
 
 def xywh_to_xyxy(xywh: torch.Tensor) -> torch.Tensor:
     """The same arithmetic as YOLOv5's ``xywh2xyxy``."""
@@ -35,7 +47,7 @@ def xywh_to_xyxy(xywh: torch.Tensor) -> torch.Tensor:
 def score_column(pred: torch.Tensor, logits: Optional[torch.Tensor], k: int, c: int,
                  score_type: str) -> torch.Tensor:
     """Candidate *k*'s score of class *c* on every image: shape ``(B,)``."""
-    if score_type == "obj_x_cls":
+    if score_type in ("obj_x_cls", "confidence"):
         return pred[:, k, 5 + c] * pred[:, k, 4]
     if score_type == "cls_prob":
         return pred[:, k, 5 + c]

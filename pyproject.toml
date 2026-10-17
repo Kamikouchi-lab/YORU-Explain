@@ -10,16 +10,20 @@ authors = [
 ]
 requires-python = ">=3.10,<3.11"
 dependencies = [
-    # The YOLOv5 adapter runs YORU's bundled YOLOv5 code -- the only code that
-    # loads a YORU v1 checkpoint -- and checks itself against YORU's own
-    # detector.  The bound is the 2.x line YORU's docs/external_api.md covers.
+    # The adapters run YORU's models the way YORU runs them -- the YOLOv5 one
+    # through YORU's bundled YOLOv5 code, the only code that loads a YORU v1
+    # checkpoint -- and check themselves against YORU's own detector.  The
+    # bound is the 2.x line YORU's docs/external_api.md covers.
     "yoru>=2.0.0b3,<3",
-    # Imported directly.  Unpinned on purpose: YORU pins them, and a second
-    # set of pins here could only disagree with it.
+    # Imported directly (ultralytics, torchvision and onnxruntime are what YORU
+    # runs its other backends with).  Unpinned on purpose: YORU pins or bounds
+    # them, and a second set of pins here could only disagree with it.
     "numpy",
     "opencv-python",
     "torch",
     "torchvision",
+    "ultralytics",
+    "onnxruntime",
     # The GUI, as in YORU and YORU-Tracker (YORU pins 1.11.1).
     "dearpygui",
 ]

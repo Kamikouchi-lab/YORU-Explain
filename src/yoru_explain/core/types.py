@@ -11,7 +11,8 @@ Coordinates
     All boxes and maps are in :data:`COORDINATE_SYSTEM`: pixels of the frame
     the detector was given -- after any flip YORU applied -- with the origin
     at the top-left corner, x to the right and y down.  A box is
-    ``(x1, y1, x2, y2)`` exactly as YORU's ``DetectorBase.detect`` reports it.
+    ``(x1, y1, x2, y2)`` exactly as YORU's ``DetectorBase.detect`` reports it;
+    a rotated box (OBB models) is YORU's ``(cx, cy, w, h, angle)``.
 """
 
 from __future__ import annotations
@@ -25,23 +26,33 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 COORDINATE_SYSTEM = "frame_px_xyxy"
 COORDINATE_SYSTEM_DESCRIPTION = (
     "pixels of the frame given to the detector (after any v_flip/h_flip), "
-    "origin top-left, x right, y down; boxes are (x1, y1, x2, y2) as YORU reports them"
+    "origin top-left, x right, y down; boxes are (x1, y1, x2, y2) as YORU reports them; "
+    "rotated boxes are (cx, cy, w, h, angle), angle in radians from +x towards +y"
 )
 
 #: The scores an adapter may be asked to explain, and what each one is.
-#: ``obj_x_cls`` is what YOLOv5 reports as a detection's confidence.
+#: ``confidence`` is the number YORU reports as a detection's confidence,
+#: whatever the model family; the others are that number's parts, for the
+#: families that have them.  Each adapter says which it offers and gives the
+#: exact definition for its family (``AdapterCapabilities.score_descriptions``).
 SCORE_TYPES: Dict[str, str] = {
+    "confidence": "the confidence the detector reports (YORU's conf); its formula depends "
+                  "on the model family",
     "obj_x_cls": "sigmoid(objectness) x sigmoid(class logit) -- the confidence YOLOv5 reports",
-    "cls_prob": "sigmoid(class logit) -- class probability given an object",
-    "obj_prob": "sigmoid(objectness) -- object probability, class-agnostic",
-    "cls_logit": "class logit, before the sigmoid",
-    "obj_logit": "objectness logit, before the sigmoid",
+    "cls_prob": "sigmoid(class logit) -- the confidence YOLOv8/YOLO11/RT-DETR report; for YOLOv5 "
+                "the class probability given an object",
+    "obj_prob": "sigmoid(objectness) -- object probability, class-agnostic (YOLOv5)",
+    "cls_softmax": "softmax class probability over the classes and background -- the confidence "
+                   "torchvision's Faster R-CNN / Mask R-CNN / SSD report",
+    "cls_logit": "class logit, before the sigmoid / softmax",
+    "obj_logit": "objectness logit, before the sigmoid (YOLOv5)",
 }
 
 #: How the explained detection is followed from one input to the next.
 IDENTITY_MODES: Dict[str, str] = {
     "fixed_candidate": (
-        "the same pre-NMS candidate (anchor slot) is read on every input; its box may move"
+        "the same pre-NMS candidate (anchor slot, anchor point or default box) is read on every "
+        "input; its box may move"
     ),
     "redetect": (
         "the detector is run end to end and its output is matched to the original "
@@ -50,6 +61,9 @@ IDENTITY_MODES: Dict[str, str] = {
 }
 
 Box = Tuple[float, float, float, float]
+#: A rotated box ``(cx, cy, w, h, angle)``, angle in radians from +x towards +y
+#: (YORU's ``yoru.libs.obb`` convention).
+Obb = Tuple[float, float, float, float, float]
 
 
 def finite_or_none(value) -> Optional[float]:
@@ -68,13 +82,25 @@ def _box(values: Sequence[float]) -> Box:
     return (x1, y1, x2, y2)
 
 
+def _obb(values: Optional[Sequence[float]]) -> Optional[Obb]:
+    if values is None:
+        return None
+    cx, cy, w, h, a = (float(v) for v in values)
+    return (cx, cy, w, h, a)
+
+
 @dataclass(frozen=True)
 class CandidateRef:
     """One pre-NMS candidate of a detector: what fixed-candidate mode follows.
 
     *index* is the row in the adapter's raw candidate tensor; *locator* says
-    where that row sits in the network (for YOLOv5: level, stride, anchor,
-    grid_y, grid_x) and is kept for reports only.
+    where that row sits in the network (YOLOv5: level, stride, anchor,
+    grid_y, grid_x; YOLOv8/YOLO11: level, stride, grid_y, grid_x; SSD: level,
+    step, grid_y, grid_x, box; RT-DETR: the query and the encoder token it
+    was selected from; Faster R-CNN: the proposal and its FPN level) and is
+    kept for reports only.  RT-DETR queries and Faster R-CNN proposals mean
+    something on one input only, so those adapters do not offer
+    fixed-candidate mode (``AdapterCapabilities.fixed_candidate``).
     """
 
     index: int
@@ -101,13 +127,19 @@ class CandidateRef:
 
 @dataclass(frozen=True)
 class Detection:
-    """One detection as the detector reported it, in frame pixels."""
+    """One detection as the detector reported it, in frame pixels.
+
+    *box* is the upright box YORU reports (``x1..y2``); for a model that
+    predicts rotated boxes (ultralytics OBB) it is the box around the rotated
+    one, and *obb* is the rotated box itself (YORU's ``cx, cy, w, h, angle``).
+    """
 
     box: Box
     score: float
     class_id: int
     class_name: str
     candidate: Optional[CandidateRef] = None
+    obb: Optional[Obb] = None
 
     @property
     def x1(self) -> float:
@@ -132,6 +164,7 @@ class Detection:
             "class_id": self.class_id,
             "class_name": self.class_name,
             "candidate": self.candidate.to_dict() if self.candidate else None,
+            "obb": list(self.obb) if self.obb is not None else None,
         }
 
     @classmethod
@@ -142,6 +175,7 @@ class Detection:
             class_id=int(d["class_id"]),
             class_name=str(d["class_name"]),
             candidate=CandidateRef.from_dict(d.get("candidate")),
+            obb=_obb(d.get("obb")),
         )
 
 
@@ -207,7 +241,7 @@ class FrameRef:
 class ScoreDefinition:
     """What number is being explained, and how the target is followed."""
 
-    score_type: str = "obj_x_cls"
+    score_type: str = "confidence"
     identity_mode: str = "fixed_candidate"
     #: Re-detection: minimum IoU with the original box for a match.
     iou_threshold: float = 0.5
@@ -268,6 +302,10 @@ class ExplanationTarget:
     @property
     def box(self) -> Box:
         return self.detection.box
+
+    @property
+    def obb(self) -> Optional[Obb]:
+        return self.detection.obb
 
     @property
     def candidate(self) -> Optional[CandidateRef]:
@@ -352,6 +390,8 @@ class ScoreResult:
     candidate_index: Optional[int] = None
     #: Fixed-candidate: the candidate's box on this input, frame pixels.
     candidate_box: Optional[Box] = None
+    #: Fixed-candidate, rotated-box models: the candidate's rotated box.
+    candidate_obb: Optional[Obb] = None
     #: Fixed-candidate: whether NMS still keeps the candidate on this input.
     candidate_kept: Optional[bool] = None
     #: Fixed-candidate: the class the candidate would be labelled with now.

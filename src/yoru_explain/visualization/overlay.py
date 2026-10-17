@@ -56,11 +56,18 @@ def overlay(frame: np.ndarray, heat: np.ndarray, valid: np.ndarray, alpha: float
 
 
 def draw_box(image: np.ndarray, box: Sequence[float], color=(0, 255, 255), label: str = "",
-             thickness: int = 2) -> np.ndarray:
+             thickness: int = 2, obb: Optional[Sequence[float]] = None) -> np.ndarray:
+    """*box* on *image* -- or, for a rotated-box model, its rotated box *obb*."""
     import cv2
 
     x1, y1, x2, y2 = (int(round(v)) for v in box)
-    cv2.rectangle(image, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
+    if obb is not None:
+        from yoru_explain.core.geometry import obb_corners
+
+        pts = np.round(obb_corners(obb)).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(image, [pts], True, color, thickness, cv2.LINE_AA)
+    else:
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
     if label:
         text = _ascii(label)
         (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
@@ -99,14 +106,14 @@ def text_block(width: int, lines: List[str]) -> np.ndarray:
 
 def triptych(frame: np.ndarray, values: np.ndarray, kind: str, box: Sequence[float],
              label: str = "", lines: Sequence[str] = (), roi: Optional[Sequence[int]] = None,
-             alpha: float = 0.5) -> np.ndarray:
+             alpha: float = 0.5, obb: Optional[Sequence[float]] = None) -> np.ndarray:
     """Original | heatmap | overlay, with the colour scale and *lines* of text."""
     import cv2
 
     heat, valid, vrange = heatmap(values, kind)
-    left = draw_box(frame.copy(), box, label=label)
-    middle = draw_box(heat.copy(), box)
-    right = draw_box(overlay(frame, heat, valid, alpha), box)
+    left = draw_box(frame.copy(), box, label=label, obb=obb)
+    middle = draw_box(heat.copy(), box, obb=obb)
+    right = draw_box(overlay(frame, heat, valid, alpha), box, obb=obb)
     if roi is not None:
         for img in (left, middle, right):
             cv2.rectangle(img, (int(roi[0]), int(roi[1])), (int(roi[2]) - 1, int(roi[3]) - 1),

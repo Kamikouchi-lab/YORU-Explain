@@ -40,6 +40,26 @@ class ImportedDetection:
     track_id: Optional[int] = None
 
 
+#: Where each layout keeps the oriented box (YORU's ``obb_of``: the upright
+#: box with angle 0 for models without rotation).
+_OBB_COLUMNS = {
+    "yoru-analysis": ("x_center", "y_center", "w", "h", "angle"),
+    "yoru-tracker": ("cx", "cy", "w", "h", "angle"),
+}
+
+
+def _rotated_box(line, col, layout):
+    """The row's rotated box, or None when it is upright (angle 0) or absent."""
+    names = _OBB_COLUMNS[layout]
+    if not all(n in col for n in names):
+        return None
+    cells = [line[col[n]].strip() if col[n] < len(line) else "" for n in names]
+    if any(c == "" for c in cells):
+        return None
+    obb = tuple(float(c) for c in cells)
+    return obb if obb[4] != 0.0 else None
+
+
 def load_detections_csv(path) -> Tuple[str, Dict[int, List[ImportedDetection]]]:
     """``(layout, {frame_index: [detections]})``."""
     path = Path(path)
@@ -68,6 +88,7 @@ def load_detections_csv(path) -> Tuple[str, Dict[int, List[ImportedDetection]]]:
                 score=float(line[col[conf_col]]),
                 class_id=int(float(line[col["class"]])),
                 class_name=line[col["class_name"]],
+                obb=_rotated_box(line, col, layout),
             )
             track = None
             if "tracking_id" in col and line[col["tracking_id"]].strip():

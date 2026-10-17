@@ -50,7 +50,7 @@ from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.geometry import LetterboxTransform
 from yoru_explain.core.hashing import sha256_file
 from yoru_explain.core.logs import get_logger
-from yoru_explain.core.types import SCORE_TYPES, CandidateRef, Detection
+from yoru_explain.core.types import CandidateRef, Detection
 
 log = get_logger("yolov5")
 
@@ -415,7 +415,12 @@ class YoruYolov5Adapter(ModelAdapter):
     # -- probe -----------------------------------------------------------
 
     def _unprobed_caps(self) -> AdapterCapabilities:
-        return AdapterCapabilities(True, True, tuple(SCORE_TYPES), False, "not probed")
+        return AdapterCapabilities(True, True, yc.YOLOV5_SCORE_TYPES, False, "not probed",
+                                   **self._family())
+
+    def _family(self) -> Dict[str, Any]:
+        return {"family": "YOLOv5 (YORU's bundled code)", "candidate_kind": "anchor slot",
+                "reported_score": "obj_x_cls", "score_descriptions": yc.YOLOV5_SCORES}
 
     def _probe(self) -> AdapterCapabilities:
         """Measure determinism, batch dependence and the gradient path on a fixed input."""
@@ -457,7 +462,7 @@ class YoruYolov5Adapter(ModelAdapter):
         return AdapterCapabilities(
             fixed_candidate=True,
             redetection=True,
-            score_types=tuple(SCORE_TYPES),
+            score_types=yc.YOLOV5_SCORE_TYPES,
             gradients=grad_ok,
             gradients_reason=reason,
             gradient_layers=tuple(li.name for li in info),
@@ -465,6 +470,7 @@ class YoruYolov5Adapter(ModelAdapter):
             batch_invariant=batch_diff == 0.0,
             batch_max_abs_diff=batch_diff,
             notes=tuple(notes),
+            **self._family(),
         )
 
     def _probe_gradients(self, prepared: PreparedInput, reference_pred) -> tuple:
@@ -483,7 +489,7 @@ class YoruYolov5Adapter(ModelAdapter):
             return False, "gradient probe: non-finite gradient"
         if not bool((grad != 0).any()):
             return False, "gradient probe: zero gradient"
-        diff = abs(float(s) - ref)
+        diff = abs(float(s.detach()) - ref)
         if diff > 1e-4:
             return False, f"gradient probe: score differs from inference by {diff:.3g}"
         return True, (f"gradient probe passed on {layer} (candidate {k}); "

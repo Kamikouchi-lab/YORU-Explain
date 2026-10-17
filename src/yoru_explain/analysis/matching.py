@@ -27,6 +27,9 @@ original box and class, and every way it can go is a named status:
 Only ``matched`` gives a score.  The others leave it unknown: a vanished
 detection's score is *not* 0 -- NMS may have suppressed it under a
 neighbour, or it may sit just below the threshold.
+
+IoU is that of the rotated boxes when the original and the candidate both
+have one (OBB models: the exact polygon IoU), else of the upright boxes.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from yoru_explain.core.geometry import iou
+from yoru_explain.core.geometry import overlap
 from yoru_explain.core.types import Detection, ScoreStatus
 
 
@@ -52,9 +55,10 @@ class MatchResult:
 
 
 def match_redetection(original_box: Sequence[float], target_class: int,
-                      detections: Sequence[Detection], iou_threshold: float) -> MatchResult:
+                      detections: Sequence[Detection], iou_threshold: float,
+                      original_obb: Optional[Sequence[float]] = None) -> MatchResult:
     """Decide which of *detections* is the original detection, if any."""
-    scored = [(iou(original_box, d.box), d) for d in detections]
+    scored = [(overlap(original_box, d.box, original_obb, d.obb), d) for d in detections]
     best_any = max((v for v, _ in scored), default=0.0)
 
     same = [(v, d) for v, d in scored if d.class_id == target_class and v >= iou_threshold]

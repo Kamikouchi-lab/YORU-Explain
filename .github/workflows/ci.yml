@@ -1,10 +1,11 @@
 # Tests on every push and pull request -- modelled on YORU-Tracker's CI.
-# NOT RUN YET: this repository has no remote; the workflow is untested.
 #
 # YORU-Explain is built against a YORU checkout beside it (pyproject's
 # [tool.uv.sources]), so the job checks YORU out next to this repository.
-# The integration tests need yolov5s.pt (downloaded below); the fly fixture
-# model is not public, so its tests skip in CI.
+# The integration tests need test models: yolov5s.pt, ultralytics' small
+# models and two ONNX exports are fetched / built below; the fly fixture model
+# is not public and the torchvision COCO models (~1 GB) are left out, so their
+# tests skip in CI.
 
 name: CI
 
@@ -55,11 +56,10 @@ jobs:
       - name: Install
         run: uv sync --locked
 
-      - name: Test weights
-        run: |
-          mkdir -p .cache/models
-          curl -sSL --retry 3 -o .cache/models/yolov5s.pt \
-            https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt
+      - name: Test models
+        run: >-
+          uv run --with "onnx>=1.16" python -c
+          "from tests.prepare_models import main; main(torchvision=False)"
 
       - name: Tests (unit, integration, in-process GUI)
         run: uv run pytest

@@ -7,10 +7,10 @@
 
     from yoru_explain import api
 
-    adapter = api.load_adapter("yoru-yolov5", "best.pt", device="auto")
+    adapter = api.load_model("best.pt")       # any YORU model; or api.load_adapter("yoru-yolov5", ...)
     project = api.Project.open_or_create("my_project")
     source = project.add_source("video.mp4")
-    model = project.add_model("best.pt", "yoru-yolov5")
+    model = project.add_model("best.pt", adapter.name)
     event = api.add_event(project, adapter, model.model_id, source["source_id"],
                           frame_index=120, detection_index=0)
     project.save()
@@ -38,7 +38,7 @@ from yoru_explain.core.pipeline import (
     reproduce_target,
     run_analysis,
 )
-from yoru_explain.core.registry import create_adapter, list_adapters
+from yoru_explain.core.registry import create_adapter, list_adapters, resolve_model
 from yoru_explain.core.types import (
     Detection,
     ExplanationTarget,
@@ -56,7 +56,8 @@ __all__ = [
     "GradCamConfig", "OcclusionConfig", "Progress", "Project", "RunOutcome", "RunReader",
     "ScoreDefinition", "add_event", "add_events_from_detections_csv", "analyze_frame",
     "describe_score", "explain",
-    "list_adapters", "load_adapter", "reproduce_target", "run_analysis", "target_from_detection",
+    "list_adapters", "load_adapter", "load_model", "reproduce_target", "resolve_model", "run_analysis",
+    "target_from_detection",
 ]
 
 
@@ -65,6 +66,20 @@ def load_adapter(name: str = "yoru-yolov5", weights=None, device: str = "auto", 
     adapter = create_adapter(name)
     adapter.load_model(weights, device=device, **options)
     return adapter
+
+
+def load_model(weights, backend: str = "auto", device: str = "auto", *, black_box: bool = False,
+               **options):
+    """The adapter for a model file of any YORU backend, loaded.
+
+    ``backend`` is a YORU backend name (``auto``, ``yolov5``, ``ultralytics``,
+    ``rtdetr``, ``torchvision``, ``onnx``); ``auto`` picks what YORU's
+    ``get_detector("auto", ...)`` would.  ``black_box=True`` explains YORU's
+    ``detect()`` only (re-detection; no Grad-CAM).  *options* go to the
+    adapter (``conf_thresh``, ``iou_thresh``; ``rgb_input`` for YOLOv5).
+    """
+    name, _backend, extra = resolve_model(weights, backend, black_box=black_box)
+    return load_adapter(name, weights, device=device, **extra, **options)
 
 
 def target_from_detection(detection: Detection, detection_index: int, image: np.ndarray, *,

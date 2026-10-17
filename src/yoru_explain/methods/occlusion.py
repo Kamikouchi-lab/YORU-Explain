@@ -293,6 +293,11 @@ def run_occlusion(adapter, frame: np.ndarray, target: ExplanationTarget, config:
         result.status, result.error_code = "failed", ErrorCode.FRAME_MISMATCH.value
         result.message = f"frame is {w}x{h}, target was made on {target.frame.width}x{target.frame.height}"
         return result
+    if config.score.identity_mode not in adapter.capabilities.identity_modes:
+        result.status, result.error_code = "failed", ErrorCode.MODEL_UNSUPPORTED.value
+        result.message = (f"{adapter.name} cannot follow a target in {config.score.identity_mode} mode; "
+                          f"it offers {list(adapter.capabilities.identity_modes)}")
+        return result
     if config.score.identity_mode == "fixed_candidate" and target.candidate is None:
         result.status, result.error_code = "failed", ErrorCode.SCORE_UNAVAILABLE.value
         result.message = "fixed-candidate mode needs the target's pre-NMS candidate"

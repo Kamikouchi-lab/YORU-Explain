@@ -28,21 +28,40 @@ family:
     The gradient path, for adapters whose capabilities say gradients were
     verified.
 
+What a "candidate" is depends on the family and is stated in the
+capabilities (``candidate_kind``): an anchor slot (YOLOv5), an anchor point
+(YOLOv8/YOLO11), a default box (SSD) or an output row (ONNX) -- fixed
+positions, the same on every input of one size, so fixed-candidate mode can
+follow them -- or a decoder query (RT-DETR) or a region proposal (Faster
+R-CNN), which are chosen anew for every input and so mean something on one
+input only: those adapters offer re-detection, and Grad-CAM of the
+candidate on the one frame.
+
 An adapter never puts its model in training mode and never changes weights.
 """
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.geometry import LetterboxTransform
-from yoru_explain.core.types import Box, Detection, ExplanationTarget, ScoreDefinition, ScoreResult
+from yoru_explain.core.types import (
+    IDENTITY_MODES,
+    SCORE_TYPES,
+    Box,
+    Detection,
+    ExplanationTarget,
+    Obb,
+    ScoreDefinition,
+    ScoreResult,
+)
 
 
 @dataclass(frozen=True)
@@ -52,7 +71,9 @@ class LayerInfo:
     name: str
     index: int
     type: str
-    #: Input pixels per feature cell (the map tiles the model input exactly).
+    #: Input pixels per feature cell; cell ``(i, j)`` is centred on input pixel
+    #: ``((j + .5) * stride, (i + .5) * stride)``.  The grid covers the input
+    #: (it tiles it exactly, except SSD's, which overhangs it).
     stride: int
     channels: int
 
@@ -78,12 +99,51 @@ class AdapterCapabilities:
     batch_invariant: Optional[bool] = None
     batch_max_abs_diff: Optional[float] = None
     notes: Tuple[str, ...] = ()
+    #: The model family, in words ("YOLOv5 (YORU's bundled code)", "RT-DETR (ultralytics)", ...).
+    family: str = ""
+    #: What one candidate is: "anchor slot", "anchor point", "default box",
+    #: "output row", "query", "proposal" -- or "" when there are none (black box).
+    candidate_kind: str = "anchor slot"
+    #: The family's own name of the score that *is* the reported confidence
+    #: (``obj_x_cls`` for YOLOv5, ``cls_prob`` for YOLOv8, ``cls_softmax`` for
+    #: torchvision); ``confidence`` means the same number.
+    reported_score: str = "confidence"
+    #: One candidate can be reported under several classes at once (SSD,
+    #: Faster R-CNN), so "NMS still keeps it" also needs the class.
+    multi_label: bool = False
+    #: ``(score_type, definition for this family)`` pairs; the general
+    #: definition (``core.types.SCORE_TYPES``) for those not listed.
+    score_descriptions: Tuple[Tuple[str, str], ...] = ()
+    #: Things the person loading the model must know (the GUI shows them):
+    #: e.g. a checkpoint the installed package runs differently from how it was built.
+    warnings: Tuple[str, ...] = ()
+
+    @property
+    def identity_modes(self) -> Tuple[str, ...]:
+        """The identity modes this adapter can score in, in ``IDENTITY_MODES`` order."""
+        ok = {"fixed_candidate": self.fixed_candidate, "redetect": self.redetection}
+        return tuple(m for m in IDENTITY_MODES if ok.get(m))
+
+    def describe(self, score_type: str) -> str:
+        """What *score_type* is for this model family."""
+        own = dict(self.score_descriptions)
+        return own.get(score_type) or SCORE_TYPES.get(score_type, score_type)
+
+    def reports(self, score_type: str) -> bool:
+        """Whether *score_type* is the confidence the detector itself reports."""
+        return score_type in ("confidence", self.reported_score)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "family": self.family,
+            "candidate_kind": self.candidate_kind,
             "fixed_candidate": self.fixed_candidate,
             "redetection": self.redetection,
+            "identity_modes": list(self.identity_modes),
             "score_types": list(self.score_types),
+            "reported_score": self.reported_score,
+            "score_definitions": {k: self.describe(k) for k in self.score_types},
+            "multi_label": self.multi_label,
             "gradients": self.gradients,
             "gradients_reason": self.gradients_reason,
             "gradient_layers": list(self.gradient_layers),
@@ -91,16 +151,22 @@ class AdapterCapabilities:
             "batch_invariant": self.batch_invariant,
             "batch_max_abs_diff": self.batch_max_abs_diff,
             "notes": list(self.notes),
+            "warnings": list(self.warnings),
         }
 
 
 @dataclass
 class PreparedInput:
-    """A batch of model inputs and the transform shared by all of them."""
+    """A batch of model inputs and the transform shared by all of them.
+
+    *extra* holds what else the adapter's forward pass needs (torchvision:
+    the resized image sizes).
+    """
 
     tensor: Any
     transform: LetterboxTransform
     frame_shape: Tuple[int, ...]
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def batch_size(self) -> int:
@@ -111,15 +177,18 @@ class PreparedInput:
 class RawOutput:
     """A forward pass's candidates, before NMS.
 
-    *pred* is ``(B, N, 5 + nc)``: ``cx, cy, w, h`` in input pixels, then
-    probabilities (objectness, classes).  *logits* has the same layout with
-    the pre-sigmoid values, when captured.  *activations* holds feature maps
-    of a gradient pass.
+    *pred* is the adapter's candidate table.  For the YOLOv5 layout it is
+    ``(B, N, 5 + nc)``: ``cx, cy, w, h`` in input pixels, then probabilities
+    (objectness, classes); other families document theirs.  *logits* holds
+    the pre-sigmoid / pre-softmax values when captured, *activations* the
+    feature maps of a gradient pass, *extra* whatever else the adapter's
+    postprocessing needs (proposals, anchors, the end-to-end head's output).
     """
 
     pred: Any
     logits: Any = None
     activations: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -129,6 +198,8 @@ class CandidateReadout:
     value: Optional[float]
     box: Optional[Box]
     argmax_class: Optional[int]
+    #: The rotated box, for models that predict one.
+    obb: Optional[Obb] = None
 
 
 class ModelAdapter(ABC):
@@ -181,6 +252,11 @@ class ModelAdapter(ABC):
     def needs_logits(self, score_type: str) -> bool:
         return score_type.endswith("_logit")
 
+    def describe_score_type(self, score_type: str) -> str:
+        """What *score_type* means for this adapter's model family."""
+        caps = self.capabilities
+        return caps.describe(score_type) if caps is not None else SCORE_TYPES.get(score_type, score_type)
+
     def detect(self, image: np.ndarray) -> List[Detection]:
         """The detections the detector reports for one frame."""
         prepared = self.preprocess([image])
@@ -228,3 +304,75 @@ class ModelAdapter(ABC):
         if training:
             raise ExplainError(ErrorCode.INTERNAL,
                                f"model modules in training mode: {training[:5]}")
+
+
+@contextlib.contextmanager
+def keep_cuda_visible():
+    """Let ultralytics pick a device without hiding the GPU from the rest of the process.
+
+    ultralytics' ``select_device`` writes ``CUDA_VISIBLE_DEVICES`` -- ``""``
+    for the CPU -- which, before CUDA is initialised, hides the GPU from
+    everything loaded later in the process.  CUDA is initialised first (the
+    variable then no longer changes what this process sees) and the variable
+    is put back afterwards.
+    """
+    import os
+
+    import torch
+
+    torch.cuda.is_available()
+    saved = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = saved
+
+
+# -- comparing an adapter with YORU's own detector -------------------------------
+
+#: Largest difference accepted between an adapter and YORU's detector -- the
+#: tolerance YORU's own v1-equivalence test uses.  ``exact`` reports whether
+#: the two were equal bit for bit.
+IDENTITY_TOLERANCE = 1e-4
+
+
+def yoru_detection_row(d: Mapping[str, Any], rotated: bool) -> List[float]:
+    """One of YORU's ``detect()`` dicts as numbers to compare."""
+    row = [d["x1"], d["y1"], d["x2"], d["y2"], d["conf"], d["class_id"]]
+    if rotated:
+        row += [d.get("cx"), d.get("cy"), d.get("w"), d.get("h"), d.get("angle")]
+    return row
+
+
+def detection_row(d: Detection, rotated: bool) -> List[float]:
+    row = [*d.box, d.score, d.class_id]
+    if rotated:
+        row += list(d.obb) if d.obb is not None else [None] * 5
+    return row
+
+
+def compare_detections(reference: str, ref_rows: Sequence[Sequence[Any]],
+                       mine_rows: Sequence[Sequence[Any]]) -> Dict[str, Any]:
+    """``identity_check``'s verdict on two lists of detection rows, in order."""
+    result: Dict[str, Any] = {"reference": reference, "n_reference": len(ref_rows),
+                              "n_adapter": len(mine_rows)}
+    if len(ref_rows) != len(mine_rows):
+        result.update(status="failed", reason="different numbers of detections",
+                      max_abs_diff=None, exact=False)
+        return result
+    diffs = []
+    for r, m in zip(ref_rows, mine_rows):
+        if len(r) != len(m) or any((a is None) != (b is None) for a, b in zip(r, m)):
+            result.update(status="failed", reason="different fields (rotated vs upright boxes?)",
+                          max_abs_diff=None, exact=False)
+            return result
+        diffs += [abs(float(a) - float(b)) for a, b in zip(r, m) if a is not None]
+    worst = max(diffs, default=0.0)
+    result.update(status="passed" if worst <= IDENTITY_TOLERANCE else "failed", max_abs_diff=worst,
+                  exact=[list(r) for r in ref_rows] == [list(m) for m in mine_rows])
+    if result["status"] == "failed":
+        result["reason"] = f"values differ by up to {worst:.3g}"
+    return result
