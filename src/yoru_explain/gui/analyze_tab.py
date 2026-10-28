@@ -4,230 +4,242 @@
 """Analyze tab: method settings, single and batch runs, progress, cancel, log.
 
 The settings here become an :class:`AnalysisRequest`; the run itself is
-``core.pipeline.run_analysis`` on the task thread.  Grad-CAM can only be
-chosen when the loaded model's gradient probe passed; otherwise the reason
-is shown and the option stays off.
+``core.pipeline.run_analysis`` on the task thread.  Grad-CAM is offered only
+when the loaded model's gradient probe passed; otherwise the reason is shown
+and the method list holds occlusion alone.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import List, Optional
 
-from PyQt5 import QtCore, QtWidgets
+import dearpygui.dearpygui as dpg
 
 from yoru_explain.core.types import IDENTITY_MODES, SCORE_TYPES
-from yoru_explain.gui.qtutil import QtLogHandler, error_box, fill_table, fmt, form_row, table
-from yoru_explain.gui.state import AppState
+from yoru_explain.gui import theme as th
+from yoru_explain.gui import widgets
+from yoru_explain.gui.widgets import LogBuffer, LogPanel, SelectTable, fmt, muted, tooltip
 from yoru_explain.methods.baselines import BASELINE_KINDS, HOT_PINK
 
+OCCLUSION = "Occlusion sensitivity (perturbation effect)"
+GRADCAM = "Grad-CAM (attribution; verified models only)"
+LAYER_AUTO = "auto (Detect input at the candidate's level)"
+REGIONS = ("context", "box", "full")
+SETTINGS_W = 440
 
-class AnalyzeTab(QtWidgets.QWidget):
-    def __init__(self, state: AppState, parent=None):
-        super().__init__(parent)
-        self.state = state
-        root = QtWidgets.QHBoxLayout(self)
 
-        # -- settings ------------------------------------------------------
-        settings = QtWidgets.QWidget()
-        sl = QtWidgets.QVBoxLayout(settings)
-        mbox = QtWidgets.QGroupBox("Method")
-        ml = QtWidgets.QVBoxLayout(mbox)
-        self.m_occ = QtWidgets.QRadioButton("Occlusion sensitivity (perturbation effect)")
-        self.m_cam = QtWidgets.QRadioButton("Grad-CAM (attribution; verified models only)")
-        self.m_occ.setChecked(True)
-        self.cam_reason = QtWidgets.QLabel("")
-        self.cam_reason.setWordWrap(True)
-        self.cam_reason.setStyleSheet("color: #a05000")
-        for w in (self.m_occ, self.m_cam, self.cam_reason):
-            ml.addWidget(w)
-        sl.addWidget(mbox)
+def _bgr_text(bgr) -> str:
+    return ",".join(str(int(v)) for v in bgr)
 
-        self.score_box = QtWidgets.QGroupBox("What is explained")
-        fl = QtWidgets.QFormLayout(self.score_box)
-        self.score_type = QtWidgets.QComboBox()
-        for k, v in SCORE_TYPES.items():
-            self.score_type.addItem(k, k)
-            self.score_type.setItemData(self.score_type.count() - 1, v, QtCore.Qt.ToolTipRole)
-        self.identity = QtWidgets.QComboBox()
-        for k, v in IDENTITY_MODES.items():
-            self.identity.addItem(k, k)
-            self.identity.setItemData(self.identity.count() - 1, v, QtCore.Qt.ToolTipRole)
-        self.iou = QtWidgets.QDoubleSpinBox()
-        self.iou.setRange(0.05, 1.0)
-        self.iou.setSingleStep(0.05)
-        self.iou.setValue(0.5)
-        form_row(fl, "score", self.score_type, "Which number of the detector is explained")
-        form_row(fl, "identity", self.identity,
-                 "fixed_candidate: the same pre-NMS candidate on every input. redetect: run NMS and "
-                 "match by class and IoU; no score when the match fails.")
-        form_row(fl, "match IoU", self.iou, "Re-detection: minimum IoU with the original box")
-        self.score_help = QtWidgets.QLabel("")
-        self.score_help.setWordWrap(True)
-        fl.addRow(self.score_help)
-        sl.addWidget(self.score_box)
 
-        self.occ_box = QtWidgets.QGroupBox("Occlusion")
-        ol = QtWidgets.QFormLayout(self.occ_box)
-        self.patch = QtWidgets.QSpinBox()
-        self.patch.setRange(2, 512)
-        self.patch.setValue(32)
-        self.stride = QtWidgets.QSpinBox()
-        self.stride.setRange(1, 512)
-        self.stride.setValue(16)
-        self.baseline = QtWidgets.QComboBox()
-        for k, v in BASELINE_KINDS.items():
-            self.baseline.addItem(k, k)
-            self.baseline.setItemData(self.baseline.count() - 1, v, QtCore.Qt.ToolTipRole)
-        self.value = QtWidgets.QLineEdit(",".join(str(v) for v in HOT_PINK))
-        self.value.setToolTip("constant baseline: B,G,R. Default 180,105,255 = hot pink #FF69B4; "
-                              "0,0,0 black; 114,114,114 YOLOv5 grey")
-        self.colour = QtWidgets.QPushButton("Colour...")
-        self.colour.setToolTip("Pick the constant baseline colour")
-        value_box = QtWidgets.QWidget()
-        value_row = QtWidgets.QHBoxLayout(value_box)
-        value_row.setContentsMargins(0, 0, 0, 0)
-        value_row.addWidget(self.value, 1)
-        value_row.addWidget(self.colour)
-        self.sigma = QtWidgets.QDoubleSpinBox()
-        self.sigma.setRange(0.5, 100)
-        self.sigma.setValue(8.0)
-        self.region = QtWidgets.QComboBox()
-        self.region.addItems(["context", "box", "full"])
-        self.context = QtWidgets.QDoubleSpinBox()
-        self.context.setRange(1.0, 20.0)
-        self.context.setValue(3.0)
-        self.batch = QtWidgets.QSpinBox()
-        self.batch.setRange(1, 256)
-        self.batch.setValue(1)
-        self.seed = QtWidgets.QSpinBox()
-        self.seed.setRange(0, 2 ** 31 - 1)
-        self.ambiguous = QtWidgets.QCheckBox("count ambiguous matches in the map")
-        form_row(ol, "patch (px)", self.patch, "Square patch size in frame pixels")
-        form_row(ol, "stride (px)", self.stride)
-        form_row(ol, "baseline", self.baseline, "What an occluded region is replaced with")
-        form_row(ol, "value (B,G,R)", value_box)
-        self.colour.clicked.connect(self._pick_colour)
-        self.value.textChanged.connect(self._show_colour)
-        self._show_colour()
-        form_row(ol, "blur sigma", self.sigma)
-        form_row(ol, "region", self.region, "context: box scaled by the factor; box; full frame")
-        form_row(ol, "context x", self.context)
-        form_row(ol, "batch size", self.batch,
-                 "Images per forward pass. 1 reproduces YORU exactly; larger is faster, and the "
-                 "reference score is then taken at the same batch size.")
-        form_row(ol, "seed", self.seed, "Noise baseline seed")
-        ol.addRow(self.ambiguous)
-        sl.addWidget(self.occ_box)
-
-        self.cam_box = QtWidgets.QGroupBox("Grad-CAM")
-        cl = QtWidgets.QFormLayout(self.cam_box)
-        self.layer = QtWidgets.QComboBox()
-        self.precision = QtWidgets.QComboBox()
-        self.precision.addItems(["inference", "fp32"])
-        form_row(cl, "layer", self.layer, "auto: the Detect input at the candidate's level")
-        form_row(cl, "precision", self.precision,
-                 "inference: the same autocast as YORU (the explained score); fp32: autocast off")
-        sl.addWidget(self.cam_box)
-
-        obox = QtWidgets.QGroupBox("Run")
-        rl = QtWidgets.QVBoxLayout(obox)
-        self.verify = QtWidgets.QCheckBox("check the adapter against YORU's detector first")
-        self.verify.setChecked(True)
-        self.cache = QtWidgets.QCheckBox("reuse identical earlier results (cache)")
-        self.cache.setChecked(True)
-        self.previews = QtWidgets.QCheckBox("write preview PNGs")
-        self.previews.setChecked(True)
-        for w in (self.verify, self.cache, self.previews):
-            rl.addWidget(w)
-        brow = QtWidgets.QHBoxLayout()
-        self.b_sel = QtWidgets.QPushButton("Analyze selected events")
-        self.b_all = QtWidgets.QPushButton("Analyze all events")
-        self.b_cancel = QtWidgets.QPushButton("Cancel")
-        self.b_cancel.setEnabled(False)
-        for b in (self.b_sel, self.b_all, self.b_cancel):
-            brow.addWidget(b)
-        rl.addLayout(brow)
-        sl.addWidget(obox)
-        sl.addStretch(1)
-
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(settings)
-        scroll.setMinimumWidth(380)
-        root.addWidget(scroll)
-
-        # -- progress, results, log ------------------------------------------
-        right = QtWidgets.QWidget()
-        vl = QtWidgets.QVBoxLayout(right)
-        self.progress = QtWidgets.QProgressBar()
-        self.progress.setRange(0, 1000)
-        self.status = QtWidgets.QLabel("Idle.")
-        self.status.setWordWrap(True)
-        vl.addWidget(self.progress)
-        vl.addWidget(self.status)
-        vl.addWidget(QtWidgets.QLabel("<b>Last run</b> (double-click a row to view it in Explore)"))
-        self.results = table(["event", "class", "status", "error", "original", "largest drop",
-                              "in box", "outside", "disappeared", "CAM in box", "file"])
-        vl.addWidget(self.results, 2)
-        vl.addWidget(QtWidgets.QLabel("<b>Log</b>"))
-        self.log = QtWidgets.QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(5000)
-        vl.addWidget(self.log, 2)
-        root.addWidget(right, 1)
-
-        self._handler = QtLogHandler(logging.INFO)
-        self._handler.emitter.record.connect(self._log_line)
+class AnalyzeTab:
+    def __init__(self, app):
+        self.app = app
+        self.state = app.state
+        self.popups = app.popups
+        self._last_run = None
+        self._layer_names: List[str] = ["auto"]
+        self._layer_labels: List[str] = [LAYER_AUTO]
+        self.results = SelectTable("ana_results", ["event", "class", "status", "error", "original",
+                                                   "largest drop", "in box", "outside",
+                                                   "disappeared", "CAM in box", "file"],
+                                   height=200, sortable=True,
+                                   on_activate=lambda key: self.state.showResult.emit(*key))
+        self.log = LogPanel("ana_log", app.themes)
+        self._handler = LogBuffer(logging.INFO)
         logging.getLogger("yoru_explain").addHandler(self._handler)
         logging.getLogger("yoru_explain").setLevel(logging.INFO)
-        self._last_run = None
+        st = self.state
+        st.adapterChanged.connect(self._adapter_changed)
+        st.tasks.busyChanged.connect(self._busy)
+        st.tasks.progress.connect(self._progress)
+        st.tasks.finished.connect(self._done)
+        st.tasks.failed.connect(self._failed)
+        st.requestImported.connect(self.set_request)
 
-        self.m_occ.toggled.connect(self._method_changed)
-        self.score_type.currentIndexChanged.connect(self._score_help)
-        self.identity.currentIndexChanged.connect(self._score_help)
-        self.b_sel.clicked.connect(lambda: self.run(selected_only=True))
-        self.b_all.clicked.connect(lambda: self.run(selected_only=False))
-        self.b_cancel.clicked.connect(self._cancel)
-        self.results.itemDoubleClicked.connect(self._open_result)
-        state.adapterChanged.connect(self._adapter_changed)
-        state.tasks.busyChanged.connect(self._busy)
-        state.tasks.progress.connect(self._progress)
-        state.tasks.finished.connect(self._done)
-        state.tasks.failed.connect(self._failed)
-        state.requestImported.connect(self.set_request)
+    # -- building ----------------------------------------------------------------
+
+    def build(self) -> None:
+        themes = self.app.themes
+        with dpg.group(horizontal=True):
+            with dpg.child_window(tag="ana_settings", width=SETTINGS_W, border=True):
+                self._build_settings(themes)
+            with dpg.child_window(tag="ana_right", border=False):
+                dpg.add_progress_bar(tag="ana_progress", default_value=0.0, width=-1, overlay="")
+                dpg.add_text("Idle.", tag="ana_status", wrap=800)
+                dpg.add_spacer(height=4)
+                widgets.heading("Last run", themes)
+                muted("double-click a row (or select it and press View) to see it in Explore", themes)
+                self.results.build()
+                dpg.add_button(label="View in Explore", callback=lambda: self._open_selected())
+                dpg.add_spacer(height=4)
+                with dpg.group(horizontal=True):
+                    t = dpg.add_text("Log")
+                    dpg.bind_item_theme(t, themes.header)
+                    dpg.add_button(label="Copy", callback=lambda: dpg.set_clipboard_text(self.log.text()))
+                dpg.add_separator()
+                self.log.build()
         self._adapter_changed()
         self._method_changed()
-        self._score_help()
 
-    # -- the baseline colour -------------------------------------------------
+    def _build_settings(self, themes) -> None:
+        widgets.heading("Method", themes)
+        dpg.add_radio_button([OCCLUSION], tag="ana_method", default_value=OCCLUSION,
+                             callback=lambda: self._method_changed())
+        dpg.add_text("", tag="ana_cam_reason", wrap=SETTINGS_W - 30)
+        dpg.bind_item_theme("ana_cam_reason", themes.warn)
+        dpg.add_spacer(height=4)
+
+        widgets.heading("What is explained", themes)
+        with dpg.group(horizontal=True):
+            dpg.add_text("score    ")
+            c = dpg.add_combo(list(SCORE_TYPES), tag="ana_score", default_value=next(iter(SCORE_TYPES)),
+                              width=-1, callback=lambda: self._score_help())
+            tooltip(c, "Which number of the detector is explained")
+        with dpg.group(horizontal=True):
+            dpg.add_text("identity ")
+            c = dpg.add_combo(list(IDENTITY_MODES), tag="ana_identity",
+                              default_value=next(iter(IDENTITY_MODES)), width=-1,
+                              callback=lambda: self._score_help())
+            tooltip(c, "fixed_candidate: the same pre-NMS candidate on every input. redetect: run "
+                       "NMS and match by class and IoU; no score when the match fails.")
+        with dpg.group(horizontal=True):
+            dpg.add_text("match IoU")
+            c = dpg.add_input_float(tag="ana_iou", default_value=0.5, min_value=0.05, max_value=1.0,
+                                    min_clamped=True, max_clamped=True, step=0.05, format="%.2f",
+                                    width=140)
+            tooltip(c, "Re-detection: minimum IoU with the original box")
+        muted("", themes, tag="ana_score_help", wrap=SETTINGS_W - 30)
+        dpg.add_spacer(height=4)
+
+        with dpg.group(tag="ana_occ"):
+            widgets.heading("Occlusion", themes)
+            self._int_row("patch (px)", "ana_patch", 32, 2, 512, "Square patch size in frame pixels")
+            self._int_row("stride (px)", "ana_stride", 16, 1, 512)
+            with dpg.group(horizontal=True):
+                dpg.add_text("baseline   ")
+                c = dpg.add_combo(list(BASELINE_KINDS), tag="ana_baseline", default_value="constant",
+                                  width=-1, callback=lambda: self._baseline_help())
+                tooltip(c, "What an occluded region is replaced with")
+            muted("", themes, tag="ana_baseline_help", wrap=SETTINGS_W - 30)
+            with dpg.group(horizontal=True):
+                dpg.add_text("value B,G,R")
+                v = dpg.add_input_text(tag="ana_value", default_value=_bgr_text(HOT_PINK), width=150,
+                                       callback=lambda: self._value_typed())
+                tooltip(v, "constant baseline: B,G,R. Default 180,105,255 = hot pink #FF69B4; "
+                           "0,0,0 black; 114,114,114 YOLOv5 grey")
+                b, g, r = HOT_PINK
+                c = dpg.add_color_edit((r, g, b, 255), tag="ana_colour", no_alpha=True, no_inputs=True,
+                                       no_label=True, callback=lambda: self._colour_picked())
+                tooltip(c, "Pick the constant baseline colour")
+            with dpg.group(horizontal=True):
+                dpg.add_text("blur sigma ")
+                dpg.add_input_float(tag="ana_sigma", default_value=8.0, min_value=0.5, max_value=100.0,
+                                    min_clamped=True, max_clamped=True, step=0.5, format="%.2f",
+                                    width=140)
+            with dpg.group(horizontal=True):
+                dpg.add_text("region     ")
+                c = dpg.add_combo(list(REGIONS), tag="ana_region", default_value="context", width=140)
+                tooltip(c, "context: box scaled by the factor; box; full frame")
+            with dpg.group(horizontal=True):
+                dpg.add_text("context x  ")
+                dpg.add_input_float(tag="ana_context", default_value=3.0, min_value=1.0, max_value=20.0,
+                                    min_clamped=True, max_clamped=True, step=0.5, format="%.2f",
+                                    width=140)
+            self._int_row("batch size", "ana_batch", 1, 1, 256,
+                          "Images per forward pass. 1 reproduces YORU exactly; larger is faster, and "
+                          "the reference score is then taken at the same batch size.")
+            self._int_row("seed", "ana_seed", 0, 0, 2 ** 31 - 1, "Noise baseline seed")
+            dpg.add_checkbox(label="count ambiguous matches in the map", tag="ana_ambiguous")
+            dpg.add_spacer(height=4)
+
+        with dpg.group(tag="ana_cam", show=False):
+            widgets.heading("Grad-CAM", themes)
+            with dpg.group(horizontal=True):
+                dpg.add_text("layer    ")
+                c = dpg.add_combo([LAYER_AUTO], tag="ana_layer", default_value=LAYER_AUTO, width=-1)
+                tooltip(c, "auto: the Detect input at the candidate's level")
+            with dpg.group(horizontal=True):
+                dpg.add_text("precision")
+                c = dpg.add_combo(["inference", "fp32"], tag="ana_precision",
+                                  default_value="inference", width=140)
+                tooltip(c, "inference: the same autocast as YORU (the explained score); "
+                           "fp32: autocast off")
+            dpg.add_spacer(height=4)
+
+        widgets.heading("Run", themes)
+        dpg.add_checkbox(label="check the adapter against YORU's detector first", tag="ana_verify",
+                         default_value=True)
+        dpg.add_checkbox(label="reuse identical earlier results (cache)", tag="ana_cache",
+                         default_value=True)
+        dpg.add_checkbox(label="write preview PNGs", tag="ana_previews", default_value=True)
+        with dpg.group(horizontal=True):
+            b = dpg.add_button(label="Analyze selected events", tag="ana_run_sel",
+                               callback=lambda: self.run(selected_only=True))
+            dpg.bind_item_theme(b, themes.primary_button)
+            dpg.add_button(label="Analyze all", tag="ana_run_all",
+                           callback=lambda: self.run(selected_only=False))
+            dpg.add_button(label="Cancel", tag="ana_cancel", enabled=False, callback=lambda: self._cancel())
+        self._baseline_help()
+
+    @staticmethod
+    def _int_row(label, tag, default, lo, hi, tip=""):
+        with dpg.group(horizontal=True):
+            dpg.add_text(f"{label:<11}")
+            item = dpg.add_input_int(tag=tag, default_value=default, min_value=lo, max_value=hi,
+                                     min_clamped=True, max_clamped=True, width=140)
+            if tip:
+                tooltip(item, tip)
+
+    def layout(self, width: int, height: int) -> None:
+        dpg.configure_item("ana_settings", height=height)
+        right = max(300, width - SETTINGS_W - 16)
+        dpg.configure_item("ana_right", width=right, height=height)
+        dpg.configure_item("ana_status", wrap=right - 20)
+        rest = max(240, height - 150)
+        dpg.configure_item(self.results.tag, height=max(100, int(rest * 0.45)))
+        dpg.configure_item(self.log.tag, height=-1)
+
+    # -- the baseline colour -----------------------------------------------------------
 
     def _bgr(self):
         """The B,G,R typed in the value field, or None if it is not three 0..255 numbers."""
         try:
-            bgr = tuple(int(v) for v in self.value.text().replace(" ", "").split(","))
+            bgr = tuple(int(v) for v in str(dpg.get_value("ana_value")).replace(" ", "").split(","))
         except ValueError:
             return None
         return bgr if len(bgr) == 3 and all(0 <= v <= 255 for v in bgr) else None
 
-    def _show_colour(self):
+    def _value_typed(self):
         bgr = self._bgr()
-        if bgr is None:
-            self.colour.setStyleSheet("")
-            return
-        b, g, r = bgr
-        text = "#000000" if 0.299 * r + 0.587 * g + 0.114 * b > 140 else "#ffffff"
-        self.colour.setStyleSheet(f"background-color: rgb({r}, {g}, {b}); color: {text};")
+        if bgr is not None:
+            b, g, r = bgr
+            dpg.set_value("ana_colour", (r, g, b, 255))
 
-    def _pick_colour(self):
-        from PyQt5 import QtGui
+    def _colour_picked(self):
+        r, g, b = (int(round(v)) for v in dpg.get_value("ana_colour")[:3])
+        dpg.set_value("ana_value", _bgr_text((b, g, r)))
+        dpg.set_value("ana_baseline", "constant")
+        self._baseline_help()
 
-        b, g, r = self._bgr() or HOT_PINK
-        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(r, g, b), self, "Baseline colour")
-        if c.isValid():
-            self.value.setText(f"{c.blue()},{c.green()},{c.red()}")
-            self.baseline.setCurrentIndex(self.baseline.findData("constant"))
+    def colour_rgb(self):
+        """The swatch's colour as (R, G, B)."""
+        return tuple(int(round(v)) for v in dpg.get_value("ana_colour")[:3])
 
-    # -- the request ---------------------------------------------------------
+    def _baseline_help(self):
+        dpg.set_value("ana_baseline_help", BASELINE_KINDS.get(dpg.get_value("ana_baseline"), ""))
+
+    # -- the request -------------------------------------------------------------------
+
+    def method(self) -> str:
+        return "gradcam" if dpg.get_value("ana_method") == GRADCAM else "occlusion"
+
+    def set_method(self, method: str) -> None:
+        items = dpg.get_item_configuration("ana_method")["items"]
+        wanted = GRADCAM if method == "gradcam" else OCCLUSION
+        dpg.set_value("ana_method", wanted if wanted in items else OCCLUSION)
+        self._method_changed()
 
     def request(self):
         from yoru_explain.core.pipeline import AnalysisRequest
@@ -236,114 +248,136 @@ class AnalyzeTab(QtWidgets.QWidget):
         from yoru_explain.methods.gradcam import GradCamConfig
         from yoru_explain.methods.occlusion import OcclusionConfig
 
-        value = tuple(int(v) for v in self.value.text().replace(" ", "").split(","))
+        value = tuple(int(v) for v in str(dpg.get_value("ana_value")).replace(" ", "").split(","))
+        g = dpg.get_value
         occ = OcclusionConfig(
-            patch_size=self.patch.value(), stride=self.stride.value(),
-            baseline=BaselineSpec(self.baseline.currentData(), value, self.sigma.value()),
-            region=self.region.currentText(), context_scale=self.context.value(),
-            score=ScoreDefinition(self.score_type.currentData(), self.identity.currentData(),
-                                  round(self.iou.value(), 4)),
-            batch_size=self.batch.value(), seed=self.seed.value(),
-            include_ambiguous=self.ambiguous.isChecked())
-        cam = GradCamConfig(layer=self.layer.currentData() or "auto",
-                            score_type=self.score_type.currentData(),
-                            precision=self.precision.currentText())
-        return AnalysisRequest("occlusion" if self.m_occ.isChecked() else "gradcam", occlusion=occ,
-                               gradcam=cam, verify_identity=self.verify.isChecked(),
-                               use_cache=self.cache.isChecked(), write_previews=self.previews.isChecked())
+            patch_size=int(g("ana_patch")), stride=int(g("ana_stride")),
+            baseline=BaselineSpec(g("ana_baseline"), value, float(g("ana_sigma"))),
+            region=g("ana_region"), context_scale=float(g("ana_context")),
+            score=ScoreDefinition(g("ana_score"), g("ana_identity"), round(float(g("ana_iou")), 4)),
+            batch_size=int(g("ana_batch")), seed=int(g("ana_seed")),
+            include_ambiguous=bool(g("ana_ambiguous")))
+        layer = g("ana_layer")
+        cam = GradCamConfig(layer=self._layer_names[self._layer_labels.index(layer)]
+                            if layer in self._layer_labels else "auto",
+                            score_type=g("ana_score"), precision=g("ana_precision"))
+        return AnalysisRequest(self.method(), occlusion=occ, gradcam=cam,
+                               verify_identity=bool(g("ana_verify")), use_cache=bool(g("ana_cache")),
+                               write_previews=bool(g("ana_previews")))
 
     def set_request(self, req):
         o = req.occlusion
-        self.m_occ.setChecked(req.method == "occlusion")
-        self.m_cam.setChecked(req.method == "gradcam")
-        self.patch.setValue(o.patch_size[0])
-        self.stride.setValue(o.stride[0])
-        self.baseline.setCurrentIndex(max(0, self.baseline.findData(o.baseline.kind)))
-        self.value.setText(",".join(str(v) for v in o.baseline.value))
-        self.sigma.setValue(o.baseline.sigma)
-        self.region.setCurrentText(o.region)
-        self.context.setValue(o.context_scale)
+        s = dpg.set_value
+        s("ana_patch", int(o.patch_size[0]))
+        s("ana_stride", int(o.stride[0]))
+        if o.baseline.kind in BASELINE_KINDS:
+            s("ana_baseline", o.baseline.kind)
+        s("ana_value", _bgr_text(o.baseline.value))
+        self._value_typed()
+        s("ana_sigma", float(o.baseline.sigma))
+        s("ana_region", o.region)
+        s("ana_context", float(o.context_scale))
         st = o.score.score_type if req.method == "occlusion" else req.gradcam.score_type
-        self.score_type.setCurrentIndex(max(0, self.score_type.findData(st)))
-        self.identity.setCurrentIndex(max(0, self.identity.findData(o.score.identity_mode)))
-        self.iou.setValue(o.score.iou_threshold)
-        self.batch.setValue(o.batch_size)
-        self.seed.setValue(o.seed)
-        self.ambiguous.setChecked(o.include_ambiguous)
-        i = self.layer.findData(req.gradcam.layer)
-        self.layer.setCurrentIndex(max(0, i))
-        self.precision.setCurrentText(req.gradcam.precision)
-        self.verify.setChecked(req.verify_identity)
-        self.cache.setChecked(req.use_cache)
-        self.previews.setChecked(req.write_previews)
+        if st in dpg.get_item_configuration("ana_score")["items"]:
+            s("ana_score", st)
+        s("ana_identity", o.score.identity_mode)
+        s("ana_iou", float(o.score.iou_threshold))
+        s("ana_batch", int(o.batch_size))
+        s("ana_seed", int(o.seed))
+        s("ana_ambiguous", bool(o.include_ambiguous))
+        if req.gradcam.layer in self._layer_names:
+            s("ana_layer", self._layer_labels[self._layer_names.index(req.gradcam.layer)])
+        else:
+            s("ana_layer", LAYER_AUTO)
+        s("ana_precision", req.gradcam.precision)
+        s("ana_verify", bool(req.verify_identity))
+        s("ana_cache", bool(req.use_cache))
+        s("ana_previews", bool(req.write_previews))
+        self.set_method(req.method)
+        self._baseline_help()
 
-    # -- state ---------------------------------------------------------------
+    # -- state ------------------------------------------------------------------------
 
     def _adapter_changed(self):
         a = self.state.adapter
-        self.layer.clear()
-        self.layer.addItem("auto (Detect input at the candidate's level)", "auto")
+        self._layer_names, self._layer_labels = ["auto"], [LAYER_AUTO]
+        themes = self.app.themes
         if a is None:
-            self.m_cam.setEnabled(False)
-            self.cam_reason.setText("Load a model to see whether Grad-CAM is available for it.")
-            return
-        caps = a.capabilities
-        self.m_cam.setEnabled(bool(caps.gradients))
-        if not caps.gradients:
-            self.m_occ.setChecked(True)
-            self.cam_reason.setStyleSheet("color: #a05000")
-            self.cam_reason.setText(f"Grad-CAM is not offered for this model: {caps.gradients_reason}")
+            dpg.configure_item("ana_method", items=[OCCLUSION])
+            dpg.set_value("ana_method", OCCLUSION)
+            dpg.set_value("ana_cam_reason", "Load a model to see whether Grad-CAM is available for it.")
+            dpg.bind_item_theme("ana_cam_reason", themes.muted)
+            dpg.configure_item("ana_score", items=list(SCORE_TYPES))
         else:
-            self.cam_reason.setStyleSheet("color: #2a6a2a")
-            self.cam_reason.setText(f"Grad-CAM: {caps.gradients_reason}")
-        for li in a.gradient_layers():
-            self.layer.addItem(li.describe(), li.name)
-        for i in range(self.score_type.count()):
-            item = self.score_type.model().item(i)
-            item.setEnabled(self.score_type.itemData(i) in caps.score_types)
+            caps = a.capabilities
+            if caps.gradients:
+                dpg.configure_item("ana_method", items=[OCCLUSION, GRADCAM])
+                dpg.set_value("ana_cam_reason", f"Grad-CAM: {caps.gradients_reason}")
+                dpg.bind_item_theme("ana_cam_reason", themes.ok)
+            else:
+                dpg.configure_item("ana_method", items=[OCCLUSION])
+                dpg.set_value("ana_method", OCCLUSION)
+                dpg.set_value("ana_cam_reason", f"Grad-CAM is not offered for this model: "
+                                                f"{caps.gradients_reason}")
+                dpg.bind_item_theme("ana_cam_reason", themes.warn)
+            for li in a.gradient_layers():
+                self._layer_labels.append(li.describe())
+                self._layer_names.append(li.name)
+            scores = [k for k in SCORE_TYPES if k in caps.score_types]
+            dpg.configure_item("ana_score", items=scores)
+            if dpg.get_value("ana_score") not in scores and scores:
+                dpg.set_value("ana_score", scores[0])
+        dpg.configure_item("ana_layer", items=self._layer_labels)
+        if dpg.get_value("ana_layer") not in self._layer_labels:
+            dpg.set_value("ana_layer", LAYER_AUTO)
+        self._method_changed()
+
+    @property
+    def gradcam_offered(self) -> bool:
+        return GRADCAM in dpg.get_item_configuration("ana_method")["items"]
 
     def _method_changed(self):
-        occ = self.m_occ.isChecked()
-        self.occ_box.setVisible(occ)
-        self.cam_box.setVisible(not occ)
-        self.identity.setEnabled(occ)
-        self.iou.setEnabled(occ)
+        occ = self.method() == "occlusion"
+        dpg.configure_item("ana_occ", show=occ)
+        dpg.configure_item("ana_cam", show=not occ)
+        dpg.configure_item("ana_identity", enabled=occ)
+        dpg.configure_item("ana_iou", enabled=occ)
         if not occ:
-            self.identity.setCurrentIndex(self.identity.findData("fixed_candidate"))
+            dpg.set_value("ana_identity", "fixed_candidate")
         self._score_help()
 
     def _score_help(self):
-        st = self.score_type.currentData()
-        mode = self.identity.currentData() if self.m_occ.isChecked() else "fixed_candidate"
+        st = dpg.get_value("ana_score")
+        occ = self.method() == "occlusion"
+        mode = dpg.get_value("ana_identity") if occ else "fixed_candidate"
         kind = ("Perturbation effect: score change when a region is replaced by the baseline."
-                if self.m_occ.isChecked() else
-                "Attribution: gradient-weighted feature map of the score (Grad-CAM).")
-        self.score_help.setText(f"<small>{kind}<br>{SCORE_TYPES.get(st, '')}<br>"
-                                f"{IDENTITY_MODES.get(mode, '')}<br>Not a biological interpretation.</small>")
+                if occ else "Attribution: gradient-weighted feature map of the score (Grad-CAM).")
+        dpg.set_value("ana_score_help", f"{kind}\n{SCORE_TYPES.get(st, '')}\n"
+                                        f"{IDENTITY_MODES.get(mode, '')}\nNot a biological interpretation.")
 
     def _busy(self, busy):
-        self.b_sel.setEnabled(not busy)
-        self.b_all.setEnabled(not busy)
-        self.b_cancel.setEnabled(busy and self.state.tasks.current == "analysis")
+        dpg.configure_item("ana_run_sel", enabled=not busy)
+        dpg.configure_item("ana_run_all", enabled=not busy)
+        dpg.configure_item("ana_cancel", enabled=busy and self.state.tasks.current == "analysis")
 
-    # -- running -------------------------------------------------------------
+    # -- running ------------------------------------------------------------------------
 
     def run(self, selected_only: bool):
         from yoru_explain.core.pipeline import run_analysis
 
         p, a = self.state.project, self.state.adapter
         if p is None or a is None or self.state.model_id is None:
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Open a project and load a model first.")
+            self.popups.message("YORU-Explain", "Open a project and load a model first.")
             return
         events = list(self.state.selected_events) if selected_only else [e["event_id"] for e in p.events]
         if not events:
-            QtWidgets.QMessageBox.information(self, "YORU-Explain",
-                                              "No events. Add detections as events in Explore.")
+            self.popups.message("YORU-Explain", "No events selected. Add detections as events in "
+                                                "Explore and select them there.")
             return
         try:
             req = self.request()
         except Exception as e:
-            error_box(self, "Settings", e)
+            self.popups.error("Settings", e)
             return
         tasks = self.state.tasks
         model_id = self.state.model_id
@@ -354,58 +388,62 @@ class AnalyzeTab(QtWidgets.QWidget):
                                 cancel=tasks.cancelled)
 
         if not tasks.submit("analysis", work):
-            QtWidgets.QMessageBox.information(self, "YORU-Explain", "Another task is running.")
+            self.popups.message("YORU-Explain", "Another task is running.")
             return
-        self.status.setText(f"Running {req.method} on {len(events)} event(s)...")
-        self.progress.setValue(0)
+        dpg.set_value("ana_status", f"Running {req.method} on {len(events)} event(s)...")
+        dpg.set_value("ana_progress", 0.0)
+        dpg.configure_item("ana_progress", overlay="0%")
         self._busy(True)
 
     def _cancel(self):
         self.state.tasks.cancel()
-        self.status.setText("Cancelling after the current batch...")
+        dpg.set_value("ana_status", "Cancelling after the current batch...")
 
     def _progress(self, fraction, message):
         if self.state.tasks.current == "analysis":
-            self.progress.setValue(int(fraction * 1000))
-            self.status.setText(message)
+            dpg.set_value("ana_progress", float(fraction))
+            dpg.configure_item("ana_progress", overlay=f"{fraction * 100:.0f}%")
+            dpg.set_value("ana_status", message)
 
     def _done(self, name, outcome):
         if name != "analysis":
             return
         self._last_run = outcome
-        self.progress.setValue(1000)
+        dpg.set_value("ana_progress", 1.0)
+        dpg.configure_item("ana_progress", overlay="100%")
         ident = outcome.identity_check or {}
-        self.status.setText(f"Run {outcome.run_id}: {outcome.status}; {outcome.counts}; identity check "
-                            f"{ident.get('status', '-')}{' (exact)' if ident.get('exact') else ''}")
-        rows, data = [], []
+        dpg.set_value("ana_status", f"Run {outcome.run_id}: {outcome.status}; {outcome.counts}; "
+                                    f"identity check {ident.get('status', '-')}"
+                                    f"{' (exact)' if ident.get('exact') else ''}")
+        rows, data, colors = [], [], []
         for r in outcome.results:
             rows.append([r.get("event_id"), r.get("behavior_class"), r.get("status"), r.get("error_code"),
                          fmt(r.get("original_score")), fmt(r.get("delta_score")),
                          fmt(r.get("in_box_mean_delta")), fmt(r.get("out_box_mean_delta")),
                          r.get("n_disappeared"), fmt(r.get("cam_in_box_fraction")), r.get("map_file")])
             data.append((str(outcome.run_dir), r.get("event_id")))
-        fill_table(self.results, rows, data=data)
+            colors.append(None if r.get("status") == "ok" else th.TEXT_WARN)
+        self.results.set_rows(rows, data, colors)
         self.state.runs_changed()
 
     def _failed(self, name, text, exc):
         if name == "analysis":
-            self.status.setText(f"Run failed: {exc}")
-            error_box(self, "Analysis", exc)
+            dpg.set_value("ana_status", f"Run failed: {exc}")
+            self.popups.error("Analysis", exc)
             self.state.runs_changed()
 
-    def _open_result(self, item):
-        data = self.results.item(item.row(), 0).data(QtCore.Qt.UserRole)
-        if data:
-            self.state.showResult.emit(*data)
+    def _open_selected(self):
+        sel = self.results.selected
+        if sel:
+            self.state.showResult.emit(*sel[0])
 
-    def _log_line(self, text, level):
-        import html
-
-        color = "#b00000" if level >= logging.ERROR else ("#a05000" if level >= logging.WARNING else None)
-        if color:
-            self.log.appendHtml(f'<span style="color:{color}">{html.escape(text)}</span>')
-        else:
-            self.log.appendPlainText(text)
+    def tick(self, now: float) -> None:
+        for text, level in self._handler.drain():
+            self.log.append(text, level)
 
     def detach_log(self):
         logging.getLogger("yoru_explain").removeHandler(self._handler)
+
+    @property
+    def last_run(self) -> Optional[object]:
+        return self._last_run

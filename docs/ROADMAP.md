@@ -1,8 +1,9 @@
 # Roadmap
 
 v0.1 (this release): YOLOv5 adapter identical to YORU, fixed-candidate and
-re-detection scoring, occlusion with controls, verified Grad-CAM, PyQt5 GUI,
-reproducible run folders, 144 tests. What follows is concrete work, in order.
+re-detection scoring, occlusion with controls, verified Grad-CAM, the GUI
+(PyQt5 at first, DearPyGui since 2026-10-17, like YORU and YORU-Tracker),
+reproducible run folders, 152 tests. What follows is concrete work, in order.
 
 ## v0.2 — validity of the explanations
 

@@ -3,7 +3,8 @@
 YORU-Explain explains YORU's behaviour detections: occlusion sensitivity
 (perturbation effect) and verified Grad-CAM (attribution) for one chosen
 detection. Sister application of YORU (`../YORU`) and YORU-Tracker
-(`../YORU-Tracker`). Windows, Python 3.10, PyQt5. Start with `README.md`;
+(`../YORU-Tracker`). Windows, Python 3.10, DearPyGui (as YORU and
+YORU-Tracker). Start with `README.md`;
 the definitions are in `docs/VALIDATION.md`, the files in `docs/DATA_SCHEMA.md`.
 
 ## Logs — check these first when something fails
@@ -46,10 +47,15 @@ the definitions are in `docs/VALIDATION.md`, the files in `docs/DATA_SCHEMA.md`.
 ## Code layout and conventions
 
 - Core (`core/`, `analysis/`, `io/`, `visualization/`, `methods/occlusion.py`)
-  imports no torch/Qt/YORU at module level and runs headless.
+  imports no torch/GUI toolkit/YORU at module level and runs headless.
 - The GUI only displays and dispatches to `core/pipeline.py` / `api.py`;
-  heavy work runs on `gui/worker.py` threads; widgets on the GUI thread only.
-- On Windows torch must be imported before PyQt5 (`gui/__init__.py` does it).
+  heavy work runs on `gui/worker.py` threads, which never touch DearPyGui:
+  the render loop (`gui/main_window.run`, manual callback management) polls
+  them each frame and delivers results through `gui/state.Signal`.
+- The window shell and base theme are YORU's documented GUI primitives
+  (`GuiSession`, `apply_default_theme`); the screens are our own. No PyQt5.
+- DearPyGui's image plot has a downward y axis, so `FrameView` flips the
+  texture's UVs; boxes and clicks are in frame pixels.
 - No `argparse` anywhere. Settings are dataclasses with strict
   `to_dict`/`from_dict` (unknown keys are errors).
 - Every written table/JSON/NPZ carries `schema_version`; change
@@ -60,7 +66,8 @@ the definitions are in `docs/VALIDATION.md`, the files in `docs/DATA_SCHEMA.md`.
 `uv sync` creates `.venv` with YORU editable from `../YORU` (torch cu128).
 Run with `uv run ...` or `.venv/Scripts/python.exe`; bare `python` on this
 machine is a broken Windows Store stub. `uv run pytest` runs everything
-(unit, integration, offscreen GUI; ~25 s). Integration tests need
+(unit, integration, the GUI in process without a viewport; ~25 s);
+`YORU_EXPLAIN_GUI_WINDOW=1` adds a real-window test. Integration tests need
 `.cache/models/yolov5s.pt` and `.cache/models/fly_copulation_yolov5s.pt`
 (or `YORU_EXPLAIN_YOLOV5_WEIGHTS` / `YORU_EXPLAIN_FLY_WEIGHTS`) and YORU's
 test video; they skip without them. `.cache/` is git-ignored: the fly model is

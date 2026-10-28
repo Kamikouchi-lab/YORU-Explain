@@ -6,33 +6,75 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
-
-from PyQt5 import QtCore
-
-from yoru_explain.gui.worker import FrameService, TaskRunner
+from typing import Callable, Dict, List, Optional
 
 
-class AppState(QtCore.QObject):
-    projectChanged = QtCore.pyqtSignal()
-    adapterChanged = QtCore.pyqtSignal()
-    eventsChanged = QtCore.pyqtSignal()
-    runsChanged = QtCore.pyqtSignal()
-    #: (run directory, event id): show this result in Explore.
-    showResult = QtCore.pyqtSignal(str, str)
-    #: An AnalysisRequest to put into the Analyze tab (settings import).
-    requestImported = QtCore.pyqtSignal(object)
+class Signal:
+    """A list of callbacks, called in order by :meth:`emit` on the render thread.
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    A callback that raises does not stop the others; the exception goes to
+    *on_error* ``(context, exc)``, or to the log.
+    """
+
+    def __init__(self, on_error: Optional[Callable[[str, BaseException], None]] = None):
+        self._slots: List[Callable] = []
+        self._on_error = on_error
+
+    def connect(self, fn: Callable) -> None:
+        self._slots.append(fn)
+
+    def disconnect(self, fn: Callable) -> None:
+        self._slots = [s for s in self._slots if s is not fn]
+
+    def emit(self, *args) -> None:
+        for fn in list(self._slots):
+            try:
+                fn(*args)
+            except Exception as exc:
+                name = getattr(fn, "__qualname__", repr(fn))
+                if self._on_error is not None:
+                    self._on_error(f"Error in {name}", exc)
+                else:
+                    from yoru_explain.core.logs import log_exception
+
+                    log_exception(f"Error in {name}", exc)
+
+
+class AppState:
+    def __init__(self):
+        #: Set by the window: ``(context, exc)`` -> log and show.  Callback
+        #: errors go there instead of breaking the render loop.
+        self.report_error: Callable[[str, BaseException], None] = self._log_error
+        err = lambda context, exc: self.report_error(context, exc)  # noqa: E731
+        self.projectChanged = Signal(err)
+        self.adapterChanged = Signal(err)
+        self.eventsChanged = Signal(err)
+        self.runsChanged = Signal(err)
+        #: ``(run directory, event id)``: show this result in Explore.
+        self.showResult = Signal(err)
+        #: An AnalysisRequest to put into the Analyze tab (settings import).
+        self.requestImported = Signal(err)
         self.project = None
         self.adapter = None
         self.model_id: Optional[str] = None
         self.device = "auto"
         self.selected_events: List[str] = []
-        self.tasks = TaskRunner(self)
-        self.frames = FrameService(self)
+        from yoru_explain.gui.worker import FrameService, TaskRunner
+
+        self.tasks = TaskRunner(err)
+        self.frames = FrameService(err)
         self._runs: Dict[str, object] = {}
+
+    @staticmethod
+    def _log_error(context: str, exc: BaseException) -> None:
+        from yoru_explain.core.logs import log_exception
+
+        log_exception(context, exc)
+
+    def poll(self) -> None:
+        """Deliver what the workers finished; once per frame."""
+        self.tasks.poll()
+        self.frames.poll()
 
     # -- project ---------------------------------------------------------
 
@@ -92,11 +134,6 @@ class AppState(QtCore.QObject):
     def shutdown(self) -> None:
         self.tasks.shutdown()
         self.frames.shutdown()
-
-
-def short(path, n: int = 48) -> str:
-    text = str(path)
-    return text if len(text) <= n else "..." + text[-(n - 3):]
 
 
 def project_name(project) -> str:

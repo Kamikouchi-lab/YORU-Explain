@@ -23,6 +23,9 @@ DOCUMENTED = {
                           "DEFAULT_IOU_THRESH"},
     "yoru.libs.user_paths": {"get_yoru_home", "get_log_dir", "get_log_file", "setup_logging",
                              "log_exception", "log_message"},
+    # The GUI primitives: the window shell and the base theme.
+    "yoru.gui_layout": {"GuiSession"},
+    "yoru.gui_base": {"apply_default_theme"},
 }
 #: Not in YORU's external API; allowed in adapters/_yoru.py only.
 INTERNAL = {
@@ -80,13 +83,23 @@ def test_no_argparse():
     assert not found, found
 
 
-def test_the_core_imports_without_torch_or_qt():
+def test_the_core_imports_without_torch_or_a_gui_toolkit():
     code = (
         "import sys\n"
         "import yoru_explain.api, yoru_explain.core.pipeline, yoru_explain.io.runs\n"
         "import yoru_explain.methods.occlusion, yoru_explain.analysis.summary\n"
         "import yoru_explain.visualization.overlay\n"
-        "print(sorted(m for m in ('torch', 'PyQt5', 'yoru') if m in sys.modules))\n"
+        "print(sorted(m for m in ('torch', 'dearpygui', 'tkinter', 'PyQt5', 'yoru')"
+        " if m in sys.modules))\n"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]", out.stdout + out.stderr
+
+
+def test_dearpygui_and_tkinter_only_in_the_gui_and_no_qt():
+    found = [f"{p.relative_to(SRC)}:{line}" for p, line, module, _ in _imports()
+             if module.split(".")[0] in ("dearpygui", "tkinter") and p.relative_to(SRC).parts[0] != "gui"]
+    assert not found, found
+    qt = [f"{p.relative_to(SRC)}:{line}" for p, line, module, _ in _imports()
+          if module.split(".")[0] in ("PyQt5", "PyQt6", "PySide2", "PySide6")]
+    assert not qt, qt

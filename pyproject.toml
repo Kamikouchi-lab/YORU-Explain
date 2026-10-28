@@ -20,8 +20,8 @@ dependencies = [
     "opencv-python",
     "torch",
     "torchvision",
-    # The GUI.  On Windows YORU already pins PyQt5 5.15.11 (for labelImg).
-    "PyQt5>=5.15",
+    # The GUI, as in YORU and YORU-Tracker (YORU pins 1.11.1).
+    "dearpygui",
 ]
 
 [project.scripts]
@@ -59,6 +59,6 @@ explicit = true
 addopts = "-ra"
 testpaths = ["tests"]
 markers = [
-    "gui: creates Qt widgets (runs offscreen)",
+    "gui: builds the DearPyGui window (in process, no viewport)",
     "slow: runs a real YOLOv5 model",
 ]
