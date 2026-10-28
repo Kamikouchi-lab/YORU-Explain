@@ -13,8 +13,10 @@ dependencies = [
     # The adapters run YORU's models the way YORU runs them -- the YOLOv5 one
     # through YORU's bundled YOLOv5 code, the only code that loads a YORU v1
     # checkpoint -- and check themselves against YORU's own detector.  The
-    # bound is the 2.x line YORU's docs/external_api.md covers.
-    "yoru>=2.0.0b3,<3",
+    # bound is the 2.x line YORU's docs/external_api.md covers; 2.0.0 Beta 4
+    # is the first release with that API and with the bundled YOLOv5 (Beta 3
+    # has neither).
+    "yoru>=2.0.0b4,<3",
     # Imported directly (ultralytics, torchvision and onnxruntime are what YORU
     # runs its other backends with).  Unpinned on purpose: YORU pins or bounds
     # them, and a second set of pins here could only disagree with it.
@@ -41,7 +43,7 @@ requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
 
 # Development only: a YORU checkout beside this repository, as for
-# YORU-Tracker.  A built wheel names just "yoru>=2.0.0b3,<3"; see README for
+# YORU-Tracker.  A built wheel names just "yoru>=2.0.0b4,<3"; see README for
 # installing without the sibling checkout.
 [tool.uv.sources]
 yoru = { path = "../YORU", editable = true }
