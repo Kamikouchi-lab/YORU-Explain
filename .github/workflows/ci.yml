@@ -1,7 +1,12 @@
 # Tests on every push and pull request -- modelled on YORU-Tracker's CI.
 #
 # YORU-Explain is built against a YORU checkout beside it (pyproject's
-# [tool.uv.sources]), so the job checks YORU out next to this repository.
+# [tool.uv.sources]), so the job checks YORU out next to this repository:
+# the ref in the repository variable YORU_REF, or else v2.0.0-beta.4, the
+# first YORU release with the external API and the bundled YOLOv5 that
+# pyproject's yoru>=2.0.0b4 asks for.  A manual run can name any ref.
+# `uv sync --locked` fails when uv.lock no longer matches pyproject and that
+# YORU: update the lock against the YORU it is meant for.
 # The integration tests need test models: yolov5s.pt, ultralytics' small
 # models and two ONNX exports are fetched / built below; the fly fixture model
 # is not public and the torchvision COCO models (~1 GB) are left out, so their
@@ -44,7 +49,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: ${{ vars.YORU_REPOSITORY || 'Kamikouchi-lab/YORU' }}
-          ref: ${{ inputs.yoru_ref || vars.YORU_REF || 'yoru-tracker-lite' }}
+          ref: ${{ inputs.yoru_ref || vars.YORU_REF || 'v2.0.0-beta.4' }}
           path: YORU
 
       - uses: astral-sh/setup-uv@v10.2.0
