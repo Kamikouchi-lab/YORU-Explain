@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import cv2
@@ -103,22 +104,28 @@ class FrameView:
             dpg.fit_axis_data(self.y_axis)
 
     def set_boxes(self, boxes: Sequence, *, selected: Optional[int] = None,
-                  labels: Sequence[str] = (), dashed: Sequence = ()) -> None:
+                  labels: Sequence[str] = (), dashed: Sequence = (), obbs: Sequence = (),
+                  dashed_obbs: Sequence = ()) -> None:
+        """Upright boxes ``(x1, y1, x2, y2)``; where *obbs* has a rotated box, that is drawn instead."""
         for it in self._items:
             if dpg.does_item_exist(it):
                 dpg.delete_item(it)
         self._items = []
         if self.image_size is None:
             return
+
+        def rot(seq, i):
+            return seq[i] if i < len(seq) else None
+
         for p in range(self.panels):
             dx = p * self.frame_width
-            for box in dashed:
-                self._rect(box, dx, self.themes.box_imported)
+            for j, box in enumerate(dashed):
+                self._rect(box, dx, self.themes.box_imported, rot(dashed_obbs, j))
             for i, box in enumerate(boxes):
                 if i != selected:
-                    self._rect(box, dx, self.themes.box)
+                    self._rect(box, dx, self.themes.box, rot(obbs, i))
             if selected is not None and 0 <= selected < len(boxes):
-                self._rect(boxes[selected], dx, self.themes.box_selected)
+                self._rect(boxes[selected], dx, self.themes.box_selected, rot(obbs, selected))
             if p:
                 continue
             for i, box in enumerate(boxes):
@@ -128,10 +135,17 @@ class FrameView:
                         label=labels[i], default_value=(float(box[0]), float(box[1])),
                         offset=(1, -2), color=(*color, 210), clamped=True, parent=self.tag))
 
-    def _rect(self, box, dx: float, theme) -> None:
-        x1, y1, x2, y2 = (float(v) for v in box)
-        s = dpg.add_line_series([x1 + dx, x2 + dx, x2 + dx, x1 + dx, x1 + dx],
-                                [y1, y1, y2, y2, y1], parent=self.y_axis)
+    def _rect(self, box, dx: float, theme, obb=None) -> None:
+        if obb is not None:
+            from yoru_explain.core.geometry import obb_corners
+
+            corners = obb_corners(obb)
+            xs = [float(x) + dx for x in corners[:, 0]] + [float(corners[0, 0]) + dx]
+            ys = [float(y) for y in corners[:, 1]] + [float(corners[0, 1])]
+        else:
+            x1, y1, x2, y2 = (float(v) for v in box)
+            xs, ys = [x1 + dx, x2 + dx, x2 + dx, x1 + dx, x1 + dx], [y1, y1, y2, y2, y1]
+        s = dpg.add_line_series(xs, ys, parent=self.y_axis)
         dpg.bind_item_theme(s, theme)
         self._items.append(s)
 
@@ -174,17 +188,43 @@ def compose(frame: np.ndarray, values: Optional[np.ndarray], kind: str, mode: st
     return np.concatenate([frame, heat, over], axis=1), 3, vrange
 
 
-def pick_box(boxes: Sequence, x: float, y: float, margin: float = 6.0) -> Optional[int]:
-    """The smallest box containing ``(x, y)``, else the nearest within *margin*."""
-    inside = [(abs((b[2] - b[0]) * (b[3] - b[1])), i) for i, b in enumerate(boxes)
-              if b[0] <= x <= b[2] and b[1] <= y <= b[3]]
+def pick_box(boxes: Sequence, x: float, y: float, margin: float = 6.0,
+             obbs: Sequence = ()) -> Optional[int]:
+    """The smallest box containing ``(x, y)``, else the nearest within *margin*.
+
+    Where *obbs* has a rotated box, "containing" means inside the rotated box.
+    """
+    from yoru_explain.core.geometry import point_in_obb
+
+    def contains(i, b):
+        o = obbs[i] if i < len(obbs) else None
+        if o is not None:
+            return point_in_obb(x, y, o)
+        return b[0] <= x <= b[2] and b[1] <= y <= b[3]
+
+    def area(i, b):
+        o = obbs[i] if i < len(obbs) else None
+        return abs(o[2] * o[3]) if o is not None else abs((b[2] - b[0]) * (b[3] - b[1]))
+
+    def distance(i, b):
+        o = obbs[i] if i < len(obbs) else None
+        if o is not None:
+            # In the rotated box's own axes.
+            c, s = math.cos(o[4]), math.sin(o[4])
+            px, py = x - o[0], y - o[1]
+            dx = max(abs(px * c + py * s) - o[2] / 2.0, 0.0)
+            dy = max(abs(-px * s + py * c) - o[3] / 2.0, 0.0)
+        else:
+            dx = max(b[0] - x, 0, x - b[2])
+            dy = max(b[1] - y, 0, y - b[3])
+        return (dx * dx + dy * dy) ** 0.5
+
+    inside = [(area(i, b), i) for i, b in enumerate(boxes) if contains(i, b)]
     if inside:
         return min(inside)[1]
     best = None
     for i, b in enumerate(boxes):
-        dx = max(b[0] - x, 0, x - b[2])
-        dy = max(b[1] - y, 0, y - b[3])
-        d = (dx * dx + dy * dy) ** 0.5
+        d = distance(i, b)
         if d <= margin and (best is None or d < best[0]):
             best = (d, i)
     return best[1] if best else None

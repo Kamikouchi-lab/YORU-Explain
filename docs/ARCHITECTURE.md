@@ -12,8 +12,12 @@ api.py ── core/pipeline.py    runs over a project's events, writes run folde
   ├── io/                     frames, project, run folders, schema, YORU CSV import
   ├── visualization/          colour tables, overlays, preview PNGs
   └── adapters/               the only code that runs a model
-        ├── base.py           the ModelAdapter contract
+        ├── base.py           the ModelAdapter contract, capabilities, the identity comparison
         ├── yolov5.py         YORU's YOLOv5, reproduced step by step
+        ├── ultralytics.py    YOLOv8 / YOLO11 / YOLOv5u / YOLOv10 (+ OBB, seg, pose) and RT-DETR
+        ├── torchvision.py    Faster R-CNN / Mask R-CNN / SSD300 checkpoints written by YORU
+        ├── onnx.py           ONNX exports, as YORU's ONNX plugin runs them
+        ├── blackbox.py       any YORU detector, through its detect() only
         ├── _yoru.py          the only module importing YORU internals
         └── toy.py            synthetic detector with known answers (tests, demos)
 core/                         types, errors, geometry, hashing, logs, registry, environment
@@ -52,7 +56,15 @@ Rules, checked by `tests/unit/test_yoru_boundary.py`:
 | `score_target(raw, prepared, target, score)` | `ScoreResult` per image in fixed-candidate or re-detection mode (`analysis/scoring.py`) |
 | `identity_check(image)` | compare with the detector it stands in for |
 | `gradient_layers()`, `default_gradient_layer()`, `forward_with_gradients()`, `candidate_score_tensor()` | the gradient path |
-| `capabilities` | `fixed_candidate`, `redetection`, `score_types`, `gradients` + reason, `gradient_layers`, `deterministic`, `batch_invariant`, `batch_max_abs_diff` |
+| `capabilities` | `family`, `candidate_kind`, `fixed_candidate`, `redetection` (→ `identity_modes`), `score_types` with `score_descriptions` and the `reported_score`, `multi_label`, `gradients` + reason, `gradient_layers`, `deterministic`, `batch_invariant`, `batch_max_abs_diff`, `notes`, `warnings` |
+
+Which adapter explains a model is decided as YORU decides which backend runs
+it (`core/registry.resolve_model`: `auto` asks YORU's own choice); each YORU
+backend has one, and anything else runs in the black box. A request the
+loaded adapter cannot honour — a score it does not have, fixed-candidate mode
+for queries or proposals, Grad-CAM without a verified gradient path — is
+refused by `pipeline.check_request` before a run folder is written. The
+families, step by step: [BACKENDS.md](BACKENDS.md).
 
 An adapter never calls `.train()`, never makes parameters require gradients
 and never writes weights; one `RLock` per adapter serialises forward passes

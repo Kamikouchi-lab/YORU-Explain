@@ -40,7 +40,7 @@ from yoru_explain.adapters.base import (
 )
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.geometry import LetterboxTransform, autoshape_input_shape, letterbox_image
-from yoru_explain.core.types import SCORE_TYPES, CandidateRef, Detection
+from yoru_explain.core.types import CandidateRef, Detection
 
 STRIDE = 16
 WINDOW = 32
@@ -241,7 +241,7 @@ class ToyGridAdapter(ModelAdapter):
         return AdapterCapabilities(
             fixed_candidate=True,
             redetection=True,
-            score_types=tuple(SCORE_TYPES),
+            score_types=yc.YOLOV5_SCORE_TYPES,
             gradients=ok,
             gradients_reason=("gradient probe passed" if ok else "gradient probe failed"),
             gradient_layers=("pool", "mix"),
@@ -249,4 +249,8 @@ class ToyGridAdapter(ModelAdapter):
             batch_invariant=diff == 0.0,
             batch_max_abs_diff=diff,
             notes=("synthetic detector for validation; its scores mean nothing biological",),
+            family="synthetic (YOLOv5 layout)",
+            candidate_kind="grid cell",
+            reported_score="obj_x_cls",
+            score_descriptions=yc.YOLOV5_SCORES,
         )

@@ -58,7 +58,7 @@ class GradCamConfig:
     #: adapter's default for the target (YOLOv5: the Detect input at the
     #: candidate's level).
     layer: str = "auto"
-    score_type: str = "obj_x_cls"
+    score_type: str = "confidence"
     #: ``inference``: the same autocast as inference (the explained score);
     #: ``fp32``: autocast off.
     precision: str = "inference"

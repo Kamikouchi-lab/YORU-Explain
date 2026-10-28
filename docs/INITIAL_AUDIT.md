@@ -82,6 +82,9 @@ reproduce is reported (`target_not_reproduced`), never analysed.
 
 ## 4. Models v0.1 can explain
 
+> **Superseded 2026-10-17:** every YORU backend is now explained — see
+> [BACKENDS.md](BACKENDS.md). The table below is kept as it was written.
+
 | Model | v0.1 | Why |
 |---|---|---|
 | YOLOv5 detection checkpoints loaded by YORU's bundled YOLOv5 (every YORU v1 model, upstream `yolov5*.pt`) | **supported**: occlusion in fixed-candidate and re-detection modes; Grad-CAM after a gradient probe passes | Sections 2 and the measurements above. |
@@ -162,7 +165,14 @@ and pinned by `tests/unit/test_yoru_boundary.py`:
 
 Because these can change without notice, every run checks the adapter
 against `get_detector(...).detect()` on its first frame and records the
-result in `manifest.json`. A proposal to document them in YORU is in
+result in `manifest.json`.
+
+> **Added 2026-10-17** for the other backends: `yoru.libs.device.resolve_device`
+> (the device string YORU hands ultralytics) and
+> `yoru.libs.plugins._auto_detect_backend` (which backend `get_detector("auto")`
+> picks for a file), in `adapters/_yoru.py` too. The ultralytics, torchvision
+> and ONNX adapters otherwise use only those packages and YORU's checkpoint
+> layout; each is checked against `get_detector(<backend>, ...)`. A proposal to document them in YORU is in
 `docs/YORU_PR_PROPOSAL.md`. It was opened as Kamikouchi-lab/YORU#43 on
 2026-10-17; it changes YORU's docs and tests only.
 

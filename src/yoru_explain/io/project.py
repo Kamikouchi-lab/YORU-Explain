@@ -68,6 +68,7 @@ def target_to_event_row(target: ExplanationTarget, note: str = "", created: str 
         "class_id": d.class_id,
         "class_name": d.class_name,
         "x1": d.box[0], "y1": d.box[1], "x2": d.box[2], "y2": d.box[3],
+        **schema.obb_columns(d.obb),
         "score": d.score,
         "candidate_index": d.candidate.index if d.candidate else None,
         "candidate_locator": json.dumps(d.candidate.locator_dict) if d.candidate else None,
@@ -287,7 +288,8 @@ class Project:
             cand = CandidateRef(int(float(e["candidate_index"])),
                                 tuple((str(k), int(v)) for k, v in loc.items()))
         det = Detection((float(e["x1"]), float(e["y1"]), float(e["x2"]), float(e["y2"])),
-                        float(e["score"]), int(float(e["class_id"])), e["class_name"], cand)
+                        float(e["score"]), int(float(e["class_id"])), e["class_name"], cand,
+                        schema.obb_from_row(e))
         frame = FrameRef(
             source_id=s["source_id"], path=s["path"], kind=s["kind"],
             frame_index=int(float(e["frame_index"])),

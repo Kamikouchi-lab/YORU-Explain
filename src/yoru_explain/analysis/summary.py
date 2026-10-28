@@ -12,23 +12,17 @@ units (planned for v0.2).
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict
 
 import numpy as np
 
+from yoru_explain.core.geometry import region_mask
 from yoru_explain.core.types import ScoreStatus
 
 
-def _box_mask(shape, box) -> np.ndarray:
-    h, w = shape
-    x1, y1, x2, y2 = box
-    mask = np.zeros((h, w), bool)
-    xa, ya = max(0, int(math.floor(x1))), max(0, int(math.floor(y1)))
-    xb, yb = min(w, int(math.ceil(x2))), min(h, int(math.ceil(y2)))
-    if xb > xa and yb > ya:
-        mask[ya:yb, xa:xb] = True
-    return mask
+def _box_mask(shape, target) -> np.ndarray:
+    """The target's pixels: its box, or its rotated box for OBB models."""
+    return region_mask(shape, target.box, target.obb)
 
 
 def _nanmean(values: np.ndarray) -> float:
@@ -65,7 +59,7 @@ def occlusion_summary(result) -> Dict[str, Any]:
             delta_mean=float(np.mean([p.delta for p in counted])),
         )
     if result.delta_map is not None:
-        mask = _box_mask(result.delta_map.shape, result.target.box)
+        mask = _box_mask(result.delta_map.shape, result.target)
         out["in_box_mean_delta"] = _nanmean(result.delta_map[mask])
         out["out_box_mean_delta"] = _nanmean(result.delta_map[~mask])
     noop = result.controls.get("noop")
@@ -88,7 +82,7 @@ def gradcam_summary(result) -> Dict[str, Any]:
     if result.cam is not None:
         cam = result.cam.astype(np.float64)
         total = float(cam.sum())
-        mask = _box_mask(cam.shape, result.target.box)
+        mask = _box_mask(cam.shape, result.target)
         out["cam_max"] = float(cam.max())
         out["cam_in_box_fraction"] = float(cam[mask].sum() / total) if total > 0 else float("nan")
     return out

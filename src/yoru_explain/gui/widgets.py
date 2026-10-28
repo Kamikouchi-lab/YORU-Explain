@@ -29,7 +29,7 @@ from yoru_explain.gui import theme as th
 VIDEO_TYPES = (("Videos and images", "*.mp4 *.avi *.mov *.mkv *.wmv *.m4v *.mpg *.mpeg "
                                      "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"),
                ("All files", "*.*"))
-MODEL_TYPES = (("PyTorch checkpoints", "*.pt"), ("All files", "*.*"))
+MODEL_TYPES = (("Models (PyTorch, ONNX)", "*.pt *.pth *.onnx"), ("All files", "*.*"))
 CSV_TYPES = (("CSV", "*.csv"), ("All files", "*.*"))
 JSON_TYPES = (("JSON", "*.json"), ("All files", "*.*"))
 

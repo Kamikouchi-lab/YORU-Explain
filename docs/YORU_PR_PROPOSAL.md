@@ -47,6 +47,15 @@ they did; that was wrong.
 Before opening the pull request, YORU's full suite was run on the branch:
 678 passed, 4 skipped (Windows, uv environment).
 
+## Since then (not in the pull request)
+
+The other backends (2026-10-17) use two more YORU names, also confined to
+`adapters/_yoru.py`: `yoru.libs.device.resolve_device` (the device string the
+ultralytics plugin passes) and `yoru.libs.plugins._auto_detect_backend` (the
+backend `get_detector("auto", ...)` picks). Documenting them — the second as
+a public `detector_backend_of(path)`, say — would be a natural follow-up
+pull request; nothing has been proposed yet.
+
 ## After it is merged
 
 Move the five names from `INTERNAL` to `DOCUMENTED` in

@@ -15,7 +15,9 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
-SCHEMA_VERSION = "0.1.0"
+#: 0.2.0 (2026-10-17): rotated boxes (``obb_*`` / ``matched_cx..angle``), every YORU backend.
+#: A 0.1.0 project or run reads unchanged: the new columns are just empty.
+SCHEMA_VERSION = "0.2.0"
 
 PROJECT_KIND = "yoru-explain-project"
 MANIFEST_KIND = "yoru-explain-run-manifest"
@@ -24,14 +26,19 @@ CONFIG_KIND = "yoru-explain-run-config"
 EVENT_COLUMNS = (
     "schema_version", "event_id", "source_id", "frame_index", "timestamp_ms", "frame_sha1",
     "frame_access", "v_flip", "h_flip", "frame_width", "frame_height", "model_id",
-    "detection_index", "class_id", "class_name", "x1", "y1", "x2", "y2", "score",
+    "detection_index", "class_id", "class_name", "x1", "y1", "x2", "y2",
+    "obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle", "score",
     "candidate_index", "candidate_locator", "target_class", "track_id", "origin", "note", "created",
 )
+
+#: The rotated box of a detection (empty for upright-box models).
+OBB_COLUMNS = ("obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle")
 
 RESULT_COLUMNS = (
     "schema_version", "run_id", "event_id", "video_id", "source_path", "frame_index",
     "timestamp_ms", "frame_sha1", "detection_id", "candidate_index", "track_id",
     "behavior_class", "class_id", "target_class", "x1", "y1", "x2", "y2",
+    "obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle",
     "stored_score", "reproduction", "reproduction_iou",
     "method", "method_kind", "score_type", "identity_mode", "baseline",
     "original_score", "reference_score", "perturbed_score", "delta_score", "max_delta_patch_id",
@@ -49,8 +56,9 @@ PERTURBATION_COLUMNS = (
     "schema_version", "run_id", "event_id", "patch_id", "kind", "x0", "y0", "x1", "y1",
     "pixel_change", "status", "perturbed_score", "delta_score", "counted", "iou",
     "candidate_index", "candidate_kept", "candidate_class",
-    "matched_x1", "matched_y1", "matched_x2", "matched_y2", "matched_score", "matched_class",
-    "n_overlapping", "error_code",
+    "matched_x1", "matched_y1", "matched_x2", "matched_y2",
+    "matched_cx", "matched_cy", "matched_w", "matched_h", "matched_angle",
+    "matched_score", "matched_class", "n_overlapping", "error_code",
 )
 
 
@@ -62,11 +70,28 @@ RESULT_INT_COLUMNS = frozenset({
     "n_candidate_dropped", "gradcam_stride", "gradient_support",
 })
 RESULT_FLOAT_COLUMNS = frozenset({
-    "timestamp_ms", "x1", "y1", "x2", "y2", "stored_score", "reproduction_iou", "original_score",
+    "timestamp_ms", "x1", "y1", "x2", "y2", "obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle",
+    "stored_score", "reproduction_iou", "original_score",
     "reference_score", "perturbed_score", "delta_score", "delta_min", "delta_mean",
     "in_box_mean_delta", "out_box_mean_delta", "noop_delta", "full_region_score", "gradient_score",
     "cam_max", "cam_in_box_fraction", "elapsed_s",
 })
+
+
+def obb_columns(obb, prefix: str = "obb_") -> Dict[str, Any]:
+    """A rotated box as table columns (``obb_cx`` ... ``obb_angle``); empty for none."""
+    names = ("cx", "cy", "w", "h", "angle")
+    if obb is None:
+        return {prefix + n: None for n in names}
+    return {prefix + n: float(v) for n, v in zip(names, obb)}
+
+
+def obb_from_row(row: Dict[str, Any], prefix: str = "obb_"):
+    """The rotated box stored in a row, or None (upright boxes, or a v0.1 file)."""
+    cells = [row.get(prefix + n) for n in ("cx", "cy", "w", "h", "angle")]
+    if any(c is None or str(c).strip() == "" for c in cells):
+        return None
+    return tuple(float(c) for c in cells)
 
 
 def typed_result_row(row: Mapping[str, Any]) -> Dict[str, Any]:

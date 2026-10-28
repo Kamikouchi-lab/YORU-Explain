@@ -92,7 +92,7 @@ class SettingsTab:
 
     def info_text(self) -> str:
         from yoru_explain.core.environment import hardware, software_versions
-        from yoru_explain.core.registry import UNSUPPORTED, list_adapters
+        from yoru_explain.core.registry import BACKEND_ADAPTERS, BLACK_BOX, UNSUPPORTED, list_adapters
         from yoru_explain.io.schema import SCHEMA_VERSION
 
         lines = [f"schema_version: {SCHEMA_VERSION}", "", "software:"]
@@ -101,6 +101,8 @@ class SettingsTab:
         lines += ["", "adapters:"]
         for e in list_adapters():
             lines.append(f"  {e.name}: {e.label}{'  [synthetic]' if e.synthetic else ''}")
+        lines += ["", "YORU backend -> adapter (any other backend, or 'black box': "
+                      f"{BLACK_BOX}):"] + [f"  {b}: {a}" for b, a in BACKEND_ADAPTERS.items()]
         lines += ["", "not supported yet:"] + [f"  {k}: {v}" for k, v in UNSUPPORTED.items()]
         a = self.state.adapter
         if a is not None:

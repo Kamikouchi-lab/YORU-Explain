@@ -55,9 +55,12 @@ reproducible run folders, 152 tests. What follows is concrete work, in order.
    kinematics). Define what occlusion means for a temporal model
    (occlude in one frame vs across the history window), then temporal
    occlusion / attribution for genuinely temporal inputs only.
-4. Further adapters: ultralytics (YOLOv8/11/26, RT-DETR; candidate = query /
-   anchor-free cell, no objectness), torchvision (proposal identity),
-   ONNX (black-box re-detection only).
+4. ~~Further adapters~~ — done 2026-10-17 (ultralytics incl. OBB / seg / pose
+   and YOLOv10, RT-DETR, torchvision, ONNX, black box; [BACKENDS.md](BACKENDS.md)).
+   Left: fixed-candidate mode for RT-DETR (follow the encoder token a query was
+   selected from, with "not selected" as a state of its own) and Faster R-CNN
+   (follow the RPN anchor); YOLO26 end to end once YORU's ultralytics runs it so;
+   rotated occlusion regions for OBB targets.
 5. RISE and other methods, with agreement between methods reported.
 
 ## Housekeeping

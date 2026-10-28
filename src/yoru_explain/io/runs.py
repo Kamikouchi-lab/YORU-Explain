@@ -193,6 +193,7 @@ def target_columns(target, source: Mapping[str, Any]) -> Dict[str, Any]:
         "class_id": d.class_id,
         "target_class": target.target_class,
         "x1": d.box[0], "y1": d.box[1], "x2": d.box[2], "y2": d.box[3],
+        **schema.obb_columns(d.obb),
     }
 
 
@@ -222,6 +223,7 @@ def perturbation_rows(event_id: str, result) -> List[Dict[str, Any]]:
             "matched_y1": m.box[1] if m else None,
             "matched_x2": m.box[2] if m else None,
             "matched_y2": m.box[3] if m else None,
+            **schema.obb_columns(m.obb if m else None, "matched_"),
             "matched_score": m.score if m else None,
             "matched_class": m.class_id if m else None,
             "n_overlapping": s.n_overlapping,
@@ -251,6 +253,8 @@ def occlusion_npz(result, extra_meta: Mapping[str, Any]):
         "patch_status": np.array([_STATUS_CODES.get(p.score.status, -1) for p in patches], np.int8),
         "patch_pixel_change": np.array([p.pixel_change for p in patches], np.float32),
         "target_box": np.array(result.target.box, np.float64),
+        "target_obb": np.array(result.target.obb if result.target.obb is not None else [np.nan] * 5,
+                               np.float64),
         "roi": np.array(result.roi, np.int32),
         "frame_shape": np.array(result.delta_map.shape, np.int32),
     }
@@ -278,6 +282,8 @@ def gradcam_npz(result, transform: Optional[Mapping[str, Any]], extra_meta: Mapp
         "cam": result.cam,
         "cam_feature": result.cam_feature,
         "target_box": np.array(result.target.box, np.float64),
+        "target_obb": np.array(result.target.obb if result.target.obb is not None else [np.nan] * 5,
+                               np.float64),
         "frame_shape": np.array(result.cam.shape, np.int32),
     }
     meta = {
@@ -287,7 +293,7 @@ def gradcam_npz(result, transform: Optional[Mapping[str, Any]], extra_meta: Mapp
         "map": "cam",
         "map_definition": "max(sum_c alpha_c A_c, 0) on the layer's grid (cam_feature is the signed sum), "
                           "alpha_c = mean gradient of the score over the grid; mapped to frame pixels by "
-                          "bilinear upsampling and undoing the letterbox",
+                          "bilinear upsampling and undoing the input transform (letterbox / resize)",
         "coordinate_system": COORDINATE_SYSTEM,
         "coordinate_system_description": COORDINATE_SYSTEM_DESCRIPTION,
         "layer": result.layer,

@@ -1,36 +1,52 @@
 # Validation — what the numbers mean and what has been checked
 
-Status at v0.1.0 (2026-10-16). Every claim below is backed by a test in
-`tests/` or by a measurement whose script and output are summarised here.
-Things not checked are listed as such in section 5.
+Status at v0.1.0 (2026-10-16), extended 2026-10-17 to every YORU detection
+backend ([BACKENDS.md](BACKENDS.md) holds the per-family details). Every
+claim below is backed by a test in `tests/` or by a measurement whose script
+and output are summarised here. Things not checked are listed as such in
+section 5.
 
 ## 1. Definitions
 
 ### 1.1 The explained score
 
-For a YOLOv5 model, the `Detect` head gives every pre-NMS candidate `k`
-(level, anchor, grid cell) logits `t_obj(k)` and `t_c(k)` per class. With the
-detection's class `c`:
+The default, `confidence`, is in every model family the number YORU reports
+for the detection, computed for its pre-NMS candidate `k` and class `c` the
+way the family computes it — so on the unchanged frame it equals YORU's
+reported confidence bit for bit:
 
-| `score_type` | Definition |
-|---|---|
-| `obj_x_cls` (default) | `σ(t_obj) · σ(t_c)` — computed as `pred[k,5+c] · pred[k,4]`, the very product YOLOv5's NMS takes, so on the unchanged frame it equals YORU's reported confidence bit for bit |
-| `cls_prob` | `σ(t_c)` |
-| `obj_prob` | `σ(t_obj)` |
-| `cls_logit`, `obj_logit` | `t_c`, `t_obj` (read from the head's convolutions by forward hooks; fp16 on CUDA) |
+| Family | `confidence` | Its parts |
+|---|---|---|
+| YOLOv5 (`Detect`: logits `t_obj(k)`, `t_c(k)` per anchor slot) | `σ(t_obj) · σ(t_c)` = `obj_x_cls`, computed as `pred[k,5+c] · pred[k,4]`, the very product YOLOv5's NMS takes | `cls_prob` `σ(t_c)`, `obj_prob` `σ(t_obj)`, `cls_logit` `t_c`, `obj_logit` `t_obj` (forward hooks on the head's convolutions; fp16 on CUDA) |
+| YOLOv8 / YOLO11 / YOLOv5u / YOLOv10 (anchor-free, no objectness) | `σ(t_c)` = `cls_prob` | `cls_logit` (hooks on the class convolutions) |
+| RT-DETR (a decoder query) | `σ(t_c)` = `cls_prob` | `cls_logit` (hook on the last decoder layer's score head) |
+| Faster / Mask R-CNN (a proposal), SSD (a default box) | `softmax(z)[c + 1]` over the classes and the background = `cls_softmax` | `cls_logit` `z[c + 1]` |
+| ONNX export | as exported: `obj · cls` (YOLOv5 layout, = `obj_x_cls`) or `cls` (YOLOv8 layout, = `cls_prob`) | YOLOv5 layout: `cls_prob`, `obj_prob`; no logits |
+| black box | the reported conf of the matched detection | — |
+
+Each run's `config.json` writes the definitions of the scores its adapter
+offers, and `results.csv` says which was used. Runs of v0.1 used `obj_x_cls`
+for the same number YOLOv5's `confidence` is now.
 
 ### 1.2 Following the detection (identity modes)
 
 * **fixed-candidate**: the target is the candidate `k` its detection came
-  from (recovered by exact equality of the NMS output row with
-  `xywh2xyxy(pred[k])`, unique on every frame tested). On a perturbed frame the
-  value is the same formula at the same `k`. Occlusion does not change the
-  frame size, so the letterbox and the grid — hence `k`'s meaning — are
-  unchanged. Recorded diagnostics: `candidate_kept` (does NMS still keep `k`?),
-  `iou` of `k`'s moved box with the original, `candidate_class`.
+  from (YOLOv5: by exact equality of the NMS output row with
+  `xywh2xyxy(pred[k])`; ultralytics: NMS's own kept indices; SSD, Faster
+  R-CNN, ONNX: exact equality of box and score — unique on every frame
+  tested). On a perturbed frame the value is the same formula at the same
+  `k`. Occlusion does not change the frame size, so the input transform and
+  the grid — hence `k`'s meaning — are unchanged. Offered only where a
+  candidate is a fixed slot (anchor slot, anchor point, default box, output
+  row): RT-DETR's queries and Faster / Mask R-CNN's proposals are chosen anew
+  for every input, and those adapters refuse this mode. Recorded diagnostics:
+  `candidate_kept` (does NMS still keep `k` — under the target class, for
+  multi-label models?), `iou` of `k`'s moved box with the original,
+  `candidate_class`.
 * **re-detection**: the detector runs end to end (NMS, the conf threshold) and
   the target is the unique detection of class `c` with IoU ≥ τ (default 0.5)
-  with the original box. Otherwise the state is `ambiguous`, `class_changed`,
+  with the original box — for rotated-box models the exact IoU of the two
+  rotated rectangles. Otherwise the state is `ambiguous`, `class_changed`,
   `unmatched` or `disappeared` and **there is no score** (a vanished detection
   may have been suppressed under a neighbour, or sit just below the threshold;
   its score is unknown, not 0).
@@ -64,8 +80,16 @@ For the fixed candidate's score `s` and a layer's feature map `A` (channels
 
 `cam_feature` keeps the signed CAM; `cam` is the ReLU, upsampled bilinearly
 (half-pixel centres: cell `(i, j)` ↦ input pixel `((j+½)s, (i+½)s)`), cropped
-by the letterbox pads and resized to the frame. Default layer: the `Detect`
-input at the candidate's own level (`model.17/20/23` for v5s-sized models).
+by the input padding and resized to the frame. Default layer — the feature
+map the candidate's score is computed from: YOLOv5 the `Detect` input at the
+candidate's own level (`model.17/20/23` for v5s-sized models); YOLOv8 /
+YOLO11 / YOLOv10 the head's input at its level (YOLOv10: the gradient
+through the one-to-one branch that produced the score); RT-DETR the decoder
+input at the level of the query's encoder token; Faster / Mask R-CNN the FPN
+level its proposal is pooled from; SSD the backbone level of its default
+box. On one frame a query or a proposal is a well-defined candidate, so
+Grad-CAM is offered for RT-DETR and Faster R-CNN although fixed-candidate
+occlusion is not. ONNX models and the black box have no gradients.
 
 A map is produced only if: the load-time gradient probe passed; the target
 has its candidate; the gradient-pass score equals the inference score (≤
@@ -89,9 +113,10 @@ a code and no map.
   events below: wherever NMS dropped the fixed candidate, re-detection matched
   a *different* candidate, and per-patch deltas of the two modes differed by
   up to 0.20.
-* **Grad-CAM at the Detect input is single-cell.** The head is a 1×1
+* **Grad-CAM at YOLOv5's Detect input is single-cell.** The head is a 1×1
   convolution, so `∂s/∂A` is non-zero at exactly one cell (measured:
-  `gradient_support = 1`). The map shows where the channels *that* cell
+  `gradient_support = 1`; YOLOv8-style heads have two 3×3 blocks: 25 cells;
+  RT-DETR and Faster R-CNN spread it over hundreds, [BACKENDS.md](BACKENDS.md) §7). The map shows where the channels *that* cell
   relies on are active anywhere — on another fly of the same class as much as
   on the target (measured: CAM mass split ≈ 50 / 50 between two solo flies).
   Earlier layers (`model.17`, `model.9`) spread the gradient (49–361 cells).
@@ -110,8 +135,10 @@ a code and no map.
 
 ## 3. What was verified
 
-`uv run pytest` — 144 tests, all passing on 2026-10-17 (Windows 11,
-Python 3.10.22, torch 2.11.0+cu128, RTX 5060 Ti; about 25 s).
+`uv run pytest` — 330 tests (one more opt-in), all passing on 2026-10-17
+(Windows 11, Python 3.10.22, torch 2.11.0+cu128, ultralytics 8.3.222,
+torchvision 0.26.0, onnxruntime 1.23.2, RTX 5060 Ti; about 2 min with every
+model fixture present, 25 s without them).
 
 | Area | How | Result |
 |---|---|---|
@@ -128,6 +155,10 @@ Python 3.10.22, torch 2.11.0+cu128, RTX 5060 Ti; about 25 s).
 | CPU only | CUDA reported missing | whole core runs on CPU; YOLOv5 autocast disabled |
 | GUI | `tests/gui`, the DearPyGui window built in process (no viewport) | model loads on a worker; click selects; analysis runs while the loop keeps ticking (no tick > 0.5 s); cancel; views and colour scale; settings export/import; a failing callback is reported, not fatal; popups open one at a time; quitting during a task asks and waits; only the latest frame request is decoded. With `YORU_EXPLAIN_GUI_WINDOW=1`: `python -m yoru_explain` opens a real window and saves a screenshot |
 | Boundary | `tests/unit/test_yoru_boundary.py` | YORU internals only in `adapters/_yoru.py`; YORU never imports yoru_explain; no argparse; the core imports without torch or a GUI toolkit; DearPyGui/tkinter only in `gui/`, no Qt |
+| Every YORU backend | `tests/integration/test_yoru_backends.py`: 13 models of the ultralytics (YOLO11, YOLOv8, YOLOv5u, YOLOv10, YOLO11 OBB / seg / pose), RT-DETR, torchvision (Faster R-CNN, Mask R-CNN, SSD300) and ONNX (YOLOv5 and YOLO11 exports) backends, on `bus.jpg`, `zidane.jpg` and frame 150 of YORU's test video, CPU and CUDA | detections equal YORU's `get_detector(...).detect` **bit for bit**, rotated boxes included; every detection's candidate recovered and its readout = its confidence bit for bit; gradient-pass score = inference score; weights, eval mode and inference untouched by Grad-CAM; noop Δ = 0 and reference = YORU's confidence in every offered mode, the others refused; each image of a batch keeps its own detections; a project run with an OBB model writes its rotated boxes and is identity-checked exactly. Details: [BACKENDS.md](BACKENDS.md) |
+| Which backend | `tests/unit/test_backends_registry.py` | `auto` resolves to the backend YORU's `get_detector("auto")` would pick (YOLOv5 by the pickle, whatever the name); every YORU backend has its own adapter; a request an adapter cannot honour is refused before a run folder is written |
+| Transforms of each family | `tests/unit/test_family_transforms.py`: 7 frame shapes | input images byte-identical to ultralytics' `LetterBox` (rect, square, 1024) and YORU's ONNX letterbox; boxes as ultralytics' `scale_boxes`, RT-DETR's normalised boxes and torchvision's `resize_boxes`; SSD's overhanging grids map cells to their centres |
+| Rotated boxes | `tests/unit/test_obb.py` | corners = `yoru.libs.obb` and ultralytics' `xywhr`; polygon IoU exact on known cases and within 0.01 of a raster count; re-detection matches rotated rods that upright boxes would confuse; events, tables and YORU CSVs keep them |
 
 ### Measured on YORU's test video (fly fixture model, CUDA, 32×32 patches, stride 16, context ×3, black)
 
@@ -203,6 +234,8 @@ and each has a regression test:
 * The YORU paper's models and other YORU v1 models: identity with YORU is
   shown for `yolov5s.pt` and the fixture model only; every run re-checks it
   on its own first frame.
+* Models trained in YORU with its other backends: the fixtures are COCO
+  models of ultralytics and torchvision and ONNX exports made here.
 * Linux, macOS, Apple MPS; GPUs other than the RTX 5060 Ti.
 * Variable-frame-rate and very long / high-resolution videos (seek
   verification is implemented; only the test video and synthetic clips were
@@ -210,4 +243,7 @@ and each has a regression test:
 * Grad-CAM sanity checks beyond the above (weight randomisation, comparison
   with occlusion across many events) — v0.2.
 * The effect of each baseline on real data beyond the single runs above.
-* Other YORU backends (ultralytics, torchvision, ONNX), OBB models, YOAKE.
+* YOLOv9, YOLOv3u, YOLOv6, YOLO12, YOLO-World / YOLOE; ultralytics' exported
+  formats (they run in the black box); ONNX Runtime's CUDA provider; YOLO26
+  run end to end (ultralytics 8.3.222 runs it with NMS — BACKENDS.md §1).
+* YOAKE.

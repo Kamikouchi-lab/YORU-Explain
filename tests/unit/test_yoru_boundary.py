@@ -1,7 +1,8 @@
 """The boundary with YORU, and the house rules, checked in the source.
 
 * Documented YORU names (YORU's docs/external_api.md) may be used anywhere.
-* YORU's YOLOv5 internals are used in ``adapters/_yoru.py`` only -- the list
+* YORU internals (the YOLOv5 entry points, the device rule, the auto-backend
+  choice) are used in ``adapters/_yoru.py`` only -- the list
   in docs/INITIAL_AUDIT.md section 8.  Kamikouchi-lab/YORU#43 proposes
   documenting them; move them to DOCUMENTED once it is merged.
 * YORU never imports YORU-Explain.
@@ -31,7 +32,10 @@ DOCUMENTED = {
 INTERNAL = {
     "yoru.libs.plugins.yolov5_detector": {"V1_NMS_CONF", "load_yolov5_model", "rgb_input_requested"},
     "yoru.libs.yolov5_support": {"YOLOV5_DIR", "yolov5_importable"},
-    "yoru.libs.device": {"torch_device"},
+    # The device YORU's torch backends use, and the string it hands ultralytics.
+    "yoru.libs.device": {"torch_device", "resolve_device"},
+    # Which backend get_detector("auto", ...) picks for a file.
+    "yoru.libs.plugins": {"_auto_detect_backend"},
     # The bundled YOLOv5's own modules, importable inside yolov5_importable().
     "utils.augmentations": {"letterbox"},
     "utils.general": {"make_divisible", "non_max_suppression", "scale_boxes", "xywh2xyxy"},

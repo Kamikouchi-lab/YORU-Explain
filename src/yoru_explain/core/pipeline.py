@@ -35,7 +35,7 @@ import numpy as np
 from yoru_explain.analysis.summary import gradcam_summary, occlusion_summary
 from yoru_explain.core.environment import hardware, software_versions
 from yoru_explain.core.errors import ErrorCode, ExplainError, error_code_of
-from yoru_explain.core.geometry import iou
+from yoru_explain.core.geometry import overlap
 from yoru_explain.core.hashing import json_sha256
 from yoru_explain.core.logs import get_logger, run_log
 from yoru_explain.core.types import (
@@ -170,13 +170,13 @@ def reproduce_target(adapter, image: np.ndarray, target: ExplanationTarget, *,
         for i, d in enumerate(detections):
             if d.candidate is not None and d.candidate.index == stored.candidate.index \
                     and d.class_id == stored.class_id:
-                v = iou(d.box, stored.box)
+                v = overlap(d.box, stored.box, d.obb, stored.obb)
                 if v >= REPRODUCE_IOU:
                     info.update(how="same_candidate", iou=v)
                     return target.with_detection(d, i), info
                 log.warning("%s: candidate %s is now at IoU %.3f from the stored box; not used",
                             target.event_id, stored.candidate.index, v)
-    same = [(iou(d.box, stored.box), i, d) for i, d in enumerate(detections)
+    same = [(overlap(d.box, stored.box, d.obb, stored.obb), i, d) for i, d in enumerate(detections)
             if d.class_id == stored.class_id]
     if same:
         best_iou, i, d = max(same, key=lambda t: (t[0], t[2].score))
@@ -199,21 +199,71 @@ def reproduce_target(adapter, image: np.ndarray, target: ExplanationTarget, *,
         f"thresholds, device, flips or frame?", info)
 
 
-def describe_score(request: AnalysisRequest, target: ExplanationTarget, class_names: Mapping[int, str]) -> str:
-    """One line saying exactly which number is explained."""
+def describe_score(request: AnalysisRequest, target: ExplanationTarget, class_names: Mapping[int, str],
+                   adapter=None) -> str:
+    """One line saying exactly which number is explained.
+
+    With *adapter*, the score is defined as that adapter's model family
+    defines it (``confidence`` is YOLOv5's ``obj_x_cls``, YOLOv8's sigmoid,
+    torchvision's softmax, ...).
+    """
     cls = class_names.get(target.target_class, str(target.target_class))
-    what = SCORE_TYPES[request.score_type].split(" -- ")[0].replace("class logit", f"'{cls}' logit")
+    st = request.score_type
+    text = adapter.describe_score_type(st) if adapter is not None else SCORE_TYPES[st]
+    what = text.split(" -- ")[0]
+    what = what.replace("class logit", f"'{cls}' logit") if "class logit" in what else \
+        f"{what} for class '{cls}'"
     if request.identity_mode == "fixed_candidate":
+        caps = getattr(adapter, "capabilities", None)
+        kind = getattr(caps, "candidate_kind", "") or "candidate"
+        # A query or a proposal is the candidate on its own frame only (Grad-CAM).
+        fixed = "fixed pre-NMS " if getattr(caps, "fixed_candidate", True) else ""
         cand = target.candidate.describe() if target.candidate else "(none)"
-        return f"{what} of fixed pre-NMS candidate {cand}"
+        return f"{what} of {fixed}{kind} {cand}"
     thr = request.occlusion.score.iou_threshold
-    return f"{what} of the post-NMS detection matched to the original (class '{cls}', IoU >= {thr:g})"
+    return (f"{what} of the reported detection matched to the original "
+            f"(class '{cls}', IoU >= {thr:g})")
+
+
+def check_request(adapter, request: AnalysisRequest) -> None:
+    """Refuse, before anything is written, a request the loaded adapter cannot honour."""
+    caps = adapter.capabilities
+    family = f" ({caps.family})" if getattr(caps, "family", "") else ""
+    if request.score_type not in caps.score_types:
+        raise ExplainError(ErrorCode.MODEL_UNSUPPORTED,
+                           f"{adapter.name}{family} cannot explain score {request.score_type!r}; "
+                           f"it offers {list(caps.score_types)}")
+    if request.method == "gradcam":
+        if not caps.gradients:
+            raise ExplainError(ErrorCode.GRADIENTS_UNAVAILABLE,
+                               f"{adapter.name}{family}: Grad-CAM is not available ({caps.gradients_reason})")
+        return
+    mode = request.occlusion.score.identity_mode
+    if mode not in caps.identity_modes:
+        if mode != "fixed_candidate":
+            why = "it cannot re-run its detector end to end"
+        elif caps.candidate_kind:
+            why = f"its candidates are {caps.candidate_kind}s, chosen anew for every input"
+        else:
+            why = "it exposes no candidates"
+        raise ExplainError(ErrorCode.MODEL_UNSUPPORTED,
+                           f"{adapter.name}{family} cannot follow a target in {mode} mode ({why}); "
+                           f"use one of {list(caps.identity_modes)}")
+
+
+#: model_info() entries that change what a cached result means: always these
+#: (as v0.1 keyed them) ...
+CACHE_SETTINGS = ("conf_thresh", "nms_conf", "iou_thresh", "channel_order", "input_size", "device",
+                  "gain", "precision")
+#: ... and these when the adapter has them.
+CACHE_SETTINGS_IF_PRESENT = ("imgsz", "task", "end2end", "max_det", "model_type", "providers",
+                             "layout", "backend", "black_box", "letterbox")
 
 
 def cache_key(adapter, frame_sha1: str, target: ExplanationTarget, request: AnalysisRequest) -> str:
     info = adapter.model_info()
-    settings = {k: info.get(k) for k in ("conf_thresh", "nms_conf", "iou_thresh", "channel_order",
-                                          "input_size", "device", "gain", "precision")}
+    settings = {k: info.get(k) for k in CACHE_SETTINGS}
+    settings.update({k: info[k] for k in CACHE_SETTINGS_IF_PRESENT if k in info})
     return json_sha256({
         "schema_version": schema.SCHEMA_VERSION,
         "adapter": adapter.name,
@@ -299,6 +349,7 @@ def run_analysis(project: Project, adapter, model_id: str, event_ids: Sequence[s
         raise ExplainError(ErrorCode.INVALID_CONFIG,
                            f"the loaded model ({info['sha256'][:12]}) is not project model {model_id} "
                            f"({model.sha256[:12]})")
+    check_request(adapter, request)
     run_id = runio.new_run_id(request.method)
     writer = runio.RunWriter(project.runs_dir, run_id)
     t_start = time.perf_counter()
@@ -312,7 +363,8 @@ def run_analysis(project: Project, adapter, model_id: str, event_ids: Sequence[s
         "request": request.to_dict(),
         "method": request.method,
         "method_config": request.method_config(),
-        "score_types": SCORE_TYPES,
+        # What each score the adapter offers is, for this model family.
+        "score_types": {k: adapter.describe_score_type(k) for k in adapter.capabilities.score_types},
         "identity_modes": IDENTITY_MODES,
         "model_id": model_id,
         "model_options": dict(model.options),
@@ -503,7 +555,7 @@ def _analyze_event(project, adapter, writer, request, target, source, readers, c
             hit = cache.lookup(key)
             if hit is not None:
                 return _copy_cached(writer, hit, target, base, rlog)
-        score_text = describe_score(request, target, adapter.class_names)
+        score_text = describe_score(request, target, adapter.class_names, adapter)
         result = analyze_frame(adapter, frame.image, target, request, progress=inner_progress,
                                cancel=cancel)
     except _IdentityFailure:
@@ -552,7 +604,7 @@ def _analyze_event(project, adapter, writer, request, target, source, readers, c
                     img = triptych(frame.image, result.delta_map, "delta", target.box,
                                    label=f"{target.detection.class_name} {result.reference_score:.3f}",
                                    lines=_preview_lines(request, target, result, score_text, method_label),
-                                   roi=result.roi)
+                                   roi=result.roi, obb=target.obb)
                     row["preview_file"] = writer.save_preview(target.event_id, "occlusion", img)
                     written.append(row["preview_file"])
         else:
@@ -565,7 +617,8 @@ def _analyze_event(project, adapter, writer, request, target, source, readers, c
                 if request.write_previews:
                     img = triptych(frame.image, result.cam, "cam", target.box,
                                    label=f"{target.detection.class_name} {result.reference_score:.3f}",
-                                   lines=_preview_lines(request, target, result, score_text, method_label))
+                                   lines=_preview_lines(request, target, result, score_text, method_label),
+                                   obb=target.obb)
                     row["preview_file"] = writer.save_preview(target.event_id, "gradcam", img)
                     written.append(row["preview_file"])
         # The tables last, the event's own row at the very end: results.csv is

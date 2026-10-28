@@ -80,6 +80,9 @@ def software_versions() -> Dict[str, Optional[str]]:
         "torch": _version("torch"),
         "torchvision": _version("torchvision"),
         "yoru": _version("yoru"),
+        # The packages YORU runs its other backends with (not imported here).
+        "ultralytics": _dist_version("ultralytics"),
+        "onnxruntime": _dist_version("onnxruntime"),
         "dearpygui": _dist_version("dearpygui"),
     }
     try:
