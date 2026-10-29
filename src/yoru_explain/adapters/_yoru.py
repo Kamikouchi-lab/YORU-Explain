@@ -87,7 +87,8 @@ def load() -> YoruYolov5:
         raise ExplainError(
             ErrorCode.MODEL_UNSUPPORTED,
             f"YORU's YOLOv5 code could not be imported ({e}). The YOLOv5 adapter needs "
-            "YORU >= 2.0.0b3 with yoru/libs/yolov5; see docs/INITIAL_AUDIT.md.") from e
+            "YORU >= 2.0.0b4 (the first release with yoru/libs/yolov5); see "
+            "docs/INITIAL_AUDIT.md.") from e
     _cached = YoruYolov5(
         yoru_version=str(yoru.__version__),
         load_yolov5_model=load_yolov5_model,
@@ -142,7 +143,7 @@ def core() -> YoruCore:
     except ImportError as e:
         raise ExplainError(ErrorCode.MODEL_UNSUPPORTED,
                            f"YORU's detector plugins could not be imported ({e}); YORU-Explain needs "
-                           "YORU >= 2.0.0b3") from e
+                           "YORU >= 2.0.0b4") from e
     _core = YoruCore(str(yoru.__version__), get_detector, list_detector_backends,
                      float(DEFAULT_CONF_THRESH), float(DEFAULT_IOU_THRESH), torch_device,
                      resolve_device)

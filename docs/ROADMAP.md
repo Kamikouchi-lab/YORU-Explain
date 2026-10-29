@@ -45,9 +45,10 @@ reproducible run folders, 152 tests. What follows is concrete work, in order.
 
 ## v0.4 — YORU-Tracker and YOAKE
 
-1. Read YORU-Tracker's track CSV and detections CSV (`frame_id` +
-   `DETECTION_COLUMNS`); attach `track_id` to events; select "all frames of
-   track 7 between t0 and t1" as one event set.
+1. ~~Read YORU-Tracker's track CSV and detections CSV (`frame_id` +
+   `DETECTION_COLUMNS`); attach `track_id` to events~~ — done 2026-10-28
+   (`yoru-tracker-tracks` layout; predicted rows skipped). Left: select "all
+   frames of track 7 between t0 and t1" as one event set.
 2. Per-track summaries over time (Δ map statistics per frame), with frames
    still not treated as independent.
 3. YOAKE adapter: study `htrtdetr`'s inference API first (single frame vs

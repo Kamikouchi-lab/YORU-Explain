@@ -11,6 +11,7 @@ import pytest
 
 from tests import synthetic as syn
 from yoru_explain import api
+from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.io import schema
 from yoru_explain.io.detections_csv import load_detections_csv
 from yoru_explain.io.runs import RunReader
@@ -264,6 +265,53 @@ def test_events_from_a_yoru_csv_in_bulk(setup, tmp_path):
     good = [by_frame[f] for f in (2, 15, 33)]
     assert all(r["reproduction"] == "iou" and r["frame_sha1"] for r in good)  # hashed when decoded
     assert len(api.add_events_from_detections_csv(project, "src-001", path, limit=2)) == 2
+
+
+#: The header YORU-Tracker writes on a ``*_tracks.csv``: YORU's
+#: DETECTION_COLUMNS, then the tracking columns.  Copied from a file it wrote
+#: (YORU-Explain does not import YORU-Tracker).
+TRACKS_HEADER = ("x1,y1,x2,y2,confidence,class,class_name,total_time,cx,cy,w,h,angle,"
+                 "frame_id,track_id,track_state,predicted,vx,vy,track_confidence,"
+                 "association_cost").split(",")
+
+
+def test_events_from_a_yoru_tracker_tracks_csv_carry_their_track(setup, tmp_path):
+    project, toy, model, events, video = setup
+    path = tmp_path / "clip_tracks.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(TRACKS_HEADER)
+        with project.open_source("src-001") as r:
+            for frame in (2, 15):
+                for d in toy.detect(r.read(frame).image):
+                    x1, y1, x2, y2 = d.box
+                    w.writerow([x1, y1, x2, y2, d.score, d.class_id, d.class_name, frame / 25,
+                                (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1, 0.0,
+                                frame, 7 + d.class_id, "active", 0, 0.0, 0.0, d.score, ""])
+        # A lost track's estimated position: no detection, no confidence.
+        w.writerow([0, 0, 30, 30, "", 0, "red", 0.8, 15, 15, 30, 30, 0.0,
+                    20, 9, "lost", 1, 1.0, 0.0, 0.4, ""])
+    layout, frames = load_detections_csv(path)
+    assert layout == "yoru-tracker-tracks" and sorted(frames) == [2, 15]
+    assert {x.track_id for x in frames[2]} == {7, 8}
+    added = api.add_events_from_detections_csv(project, "src-001", path, model_id=model.model_id,
+                                               class_names=["red"])
+    assert len(added) == 2
+    project.save()
+    assert {project.target(e).track_id for e in added} == {7}
+    out = api.run_analysis(project, toy, model.model_id, added, REQ)
+    rows = RunReader(out.run_dir).results
+    assert [r["status"] for r in rows] == ["ok", "ok"]
+    assert all(r["reproduction"] == "iou" and r["track_id"] == "7" for r in rows)
+
+
+def test_a_yoru_realtime_detect_csv_is_refused_with_the_reason(tmp_path):
+    path = tmp_path / "rec_detect.csv"
+    path.write_text("x1,y1,x2,y2,confidence,class,class_name,total_time,cx,cy,w,h,angle\n"
+                    "10,20,50,40,0.9,0,fly,1.25,30,30,40,20,0\n", encoding="utf-8")
+    with pytest.raises(ExplainError, match="_log.csv") as info:
+        load_detections_csv(path)
+    assert info.value.code == ErrorCode.MISSING_DATA
 
 
 def test_a_failed_identity_check_stops_the_run(setup, monkeypatch):

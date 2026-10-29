@@ -76,7 +76,7 @@ YORU-Explain needs a YORU checkout next to it, as YORU-Tracker does:
 
 ```text
 YORU-dev/
-├── YORU/            # https://github.com/Kamikouchi-lab/YORU (2.0.0b3 or later, with yoru/libs/yolov5)
+├── YORU/            # https://github.com/Kamikouchi-lab/YORU (2.0.0 Beta 4 or later)
 └── YORU-Explain/    # this repository
 ```
 
@@ -88,7 +88,7 @@ uv run python -m yoru_explain
 
 Without the sibling checkout, install YORU first and then this package
 (`pip install "yoru @ git+https://github.com/Kamikouchi-lab/YORU"` followed by
-`pip install .`); the built package only requires `yoru>=2.0.0b3,<3`, never a
+`pip install .`); the built package only requires `yoru>=2.0.0b4,<3`, never a
 local path.
 
 Verified on Windows 11, Python 3.10.22, torch 2.11.0+cu128 (RTX 5060 Ti and
@@ -102,9 +102,13 @@ CPU), DearPyGui 1.11.1. Other platforms are untested.
    `v_flip`/`h_flip` if they were used), add a model (type `auto` picks the
    backend YORU would; *black box* explains YORU's `detect()` only), *Load
    selected model*.
-   Optionally attach a YORU detections CSV: its boxes are shown in light blue, and
-   *Events from CSV...* turns them into events in bulk (each is found again
-   with the loaded model before it is analysed).
+   Optionally attach a detections CSV — YORU's video-analysis `<video>.csv`, or
+   YORU-Tracker's `*_tracks.csv` / `*_detections.csv` (a track's events keep
+   its `track_id`; set the flips its `*_tracks.json` records): its boxes are
+   shown in light blue, and *Events from CSV...* turns them into events in
+   bulk (each is found again with the loaded model before it is analysed).
+   YORU's real-time `*_detect.csv` is not read directly; track it with
+   YORU-Tracker (with its `*_log.csv` beside it) and attach the tracks.
 2. *Explore* — move to a frame (slider, `<` `>`, or the arrow keys); the
    loaded model's detections are drawn on the frame, whose axes are frame
    pixels (wheel zooms, drag pans, double-click fits). Click a box, *Add
