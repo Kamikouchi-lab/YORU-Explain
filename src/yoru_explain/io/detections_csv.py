@@ -32,6 +32,7 @@ found again (same class, IoU >= 0.9); otherwise the event fails with
 from __future__ import annotations
 
 import csv
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -127,3 +128,103 @@ def load_detections_csv(path) -> Tuple[str, Dict[int, List[ImportedDetection]]]:
                 track = int(float(line[col[track_col]]))
             frames.setdefault(frame, []).append(ImportedDetection(frame, det, track))
     return layout, frames
+
+
+#: How :func:`choose_detections` goes through a file.
+ORDERS = ("first", "random")
+
+
+def _spread(items: list, n: int, rng: random.Random) -> list:
+    """*n* of *items* (``(frame, position, detection)``) at random, spread over frames.
+
+    The frames are shuffled and one box is taken from each in turn (a box
+    at random on a frame with several), so *n* boxes come from *n*
+    different frames whenever the items cover that many; only then does a
+    frame give a second box.
+    """
+    by_frame: Dict[int, list] = {}
+    for item in items:
+        by_frame.setdefault(item[0], []).append(item)
+    order = sorted(by_frame)
+    rng.shuffle(order)
+    for f in order:
+        rng.shuffle(by_frame[f])
+    out: list = []
+    depth = 0
+    while len(out) < n:
+        layer = [by_frame[f][depth] for f in order if depth < len(by_frame[f])]
+        if not layer:
+            break
+        out.extend(layer[:n - len(out)])
+        depth += 1
+    return out
+
+
+def choose_detections(by_frame: Dict[int, List[ImportedDetection]], *, class_names=None,
+                      frames=None, limit: Optional[int] = None,
+                      per_class: Optional[Dict[str, int]] = None, order: str = "first",
+                      seed: Optional[int] = None, skip=None) -> List[ImportedDetection]:
+    """The detections of a :func:`load_detections_csv` table to make events of.
+
+    *class_names* keeps only those classes, *frames* only those frame
+    indices, *skip* (``ImportedDetection -> bool``) leaves out the ones it
+    returns True for.  How many: *limit* at most that many in all, or
+    *per_class* ``{class_name: n}`` at most *n* of each of those classes
+    (instead of *class_names* and *limit*).
+
+    ``order="first"`` takes them from the first frame on, in the file's
+    order.  ``order="random"`` draws them with ``random.Random(seed)``,
+    spread over frames: *n* boxes of a class come from *n* different frames
+    whenever the chosen frames hold that many (see :func:`_spread`).  The
+    same file, choices and seed give the same detections.
+
+    Returned in frame order (and the file's order on a frame).
+    """
+    if order not in ORDERS:
+        raise ExplainError(ErrorCode.INVALID_CONFIG,
+                           f"order must be one of {', '.join(ORDERS)}, not {order!r}")
+    if per_class is not None:
+        if class_names is not None or limit is not None:
+            raise ExplainError(ErrorCode.INVALID_CONFIG,
+                               "give per_class, or class_names and limit, not both")
+        if any(int(n) < 0 for n in per_class.values()):
+            raise ExplainError(ErrorCode.INVALID_CONFIG, "a per_class count is negative")
+        per_class = {str(k): int(n) for k, n in per_class.items() if int(n) > 0}
+        keep_classes = set(per_class)
+    else:
+        keep_classes = set(class_names) if class_names is not None else None
+    if limit is not None and int(limit) < 0:
+        raise ExplainError(ErrorCode.INVALID_CONFIG, "limit is negative")
+    keep_frames = set(int(f) for f in frames) if frames is not None else None
+    items = []   # (frame, position on the frame, detection), in the file's order
+    for frame_index in sorted(by_frame):
+        if keep_frames is not None and frame_index not in keep_frames:
+            continue
+        for pos, imported in enumerate(by_frame[frame_index]):
+            if keep_classes is not None and imported.detection.class_name not in keep_classes:
+                continue
+            if skip is not None and skip(imported):
+                continue
+            items.append((frame_index, pos, imported))
+
+    if order == "random":
+        rng = random.Random(seed)
+        if per_class is not None:
+            chosen = []
+            for name in sorted(per_class):
+                of_class = [x for x in items if x[2].detection.class_name == name]
+                chosen += _spread(of_class, per_class[name], rng)
+        else:
+            chosen = _spread(items, len(items) if limit is None else int(limit), rng)
+        chosen.sort(key=lambda x: (x[0], x[1]))
+    elif per_class is not None:
+        taken: Dict[str, int] = {}
+        chosen = []
+        for x in items:
+            name = x[2].detection.class_name
+            if taken.get(name, 0) < per_class[name]:
+                taken[name] = taken.get(name, 0) + 1
+                chosen.append(x)
+    else:
+        chosen = items if limit is None else items[:int(limit)]
+    return [x[2] for x in chosen]

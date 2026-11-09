@@ -36,6 +36,12 @@ Conventions in all files:
 | `sources[]` | `source_id` (`src-001`…), `path` (absolute), `kind` (`video`/`image`), `v_flip`, `h_flip`, `size` (bytes), `quick_id` + `quick_id_method` (`sha256(size, first 8 MiB, last 8 MiB)`), `width`, `height`, `fps` (as the container states it), `frame_count` (as stated), `fourcc`, `seek_check` (`null` or `{status, samples, mismatched}`), `detections_files[]` (`{path, layout, frames, detections}`), `added` |
 | `models[]` | `model_id` (`mdl-001`…), `path`, `sha256` (whole file; `synthetic` for the test detector), `adapter` (`yoru-yolov5`, `yoru-ultralytics`, `yoru-rtdetr`, `yoru-torchvision`, `yoru-onnx`, `yoru-detector` (black box), `toy-grid`), `options` (`conf_thresh`, `iou_thresh`; `rgb_input` for YOLOv5; `backend` for the black box) |
 | `settings` | reserved |
+| `removed` | optional: `{sources[], models[]}`, the sources and models taken out of the project, as they were, each with `removed` (the time). Their ids are never given again, so an event or a run that names one still means that file. Absent until something is removed; readers that do not know it can ignore it (no version change). |
+
+Removing a source also removes the events picked on it from `events.csv`;
+removing a model keeps its events (a run with another model finds each one
+again by class and IoU, without its candidate index). New ids are one above
+the highest in `sources` / `models`, `removed` and `events.csv`.
 
 ## events.csv
 

@@ -16,6 +16,9 @@
     project.save()
     outcome = api.run_analysis(project, adapter, model.model_id, [event],
                                api.AnalysisRequest(method="occlusion"))
+    # Both methods, as the GUI's Both methods buttons: Grad-CAM, then occlusion.
+    outcomes = api.run_analyses(project, adapter, model.model_id, [event],
+                                [api.AnalysisRequest(method=m) for m in api.BOTH_METHODS])
 
 Settings are dataclasses (:class:`OcclusionConfig`, :class:`GradCamConfig`,
 :class:`AnalysisRequest`) with ``to_dict`` / ``from_dict``, so they can be
@@ -30,12 +33,14 @@ import numpy as np
 
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.pipeline import (
+    BOTH_METHODS,
     AnalysisRequest,
     Progress,
     RunOutcome,
     analyze_frame,
     describe_score,
     reproduce_target,
+    run_analyses,
     run_analysis,
 )
 from yoru_explain.core.registry import create_adapter, list_adapters, resolve_model
@@ -52,12 +57,12 @@ from yoru_explain.methods.gradcam import GradCamConfig
 from yoru_explain.methods.occlusion import OcclusionConfig
 
 __all__ = [
-    "AnalysisRequest", "BaselineSpec", "Detection", "ExplanationTarget", "FrameRef",
+    "BOTH_METHODS", "AnalysisRequest", "BaselineSpec", "Detection", "ExplanationTarget", "FrameRef",
     "GradCamConfig", "OcclusionConfig", "Progress", "Project", "RunOutcome", "RunReader",
     "ScoreDefinition", "add_event", "add_events_from_detections_csv", "analyze_frame",
     "describe_score", "explain",
-    "list_adapters", "load_adapter", "load_model", "reproduce_target", "resolve_model", "run_analysis",
-    "target_from_detection",
+    "list_adapters", "load_adapter", "load_model", "reproduce_target", "resolve_model",
+    "run_analyses", "run_analysis", "target_from_detection",
 ]
 
 
@@ -119,38 +124,59 @@ def add_event(project: Project, adapter, model_id: str, source_id: str, frame_in
 
 def add_events_from_detections_csv(project: Project, source_id: str, csv_path, *, model_id: str = "",
                                    class_names=None, frames=None, limit: Optional[int] = None,
-                                   note: str = "") -> list:
+                                   per_class: Optional[dict] = None, order: str = "first",
+                                   seed: Optional[int] = None, note: str = "") -> list:
     """Add the detections of a YORU (or YORU-Tracker) detections CSV as events.
 
     Such events carry neither a pre-NMS candidate nor a frame hash
     (``frame_access="unread"``): a run decodes the frame, runs the detector and
     must find each box again (same class, IoU >= 0.9), or reports
     ``target_not_reproduced``.  *class_names* keeps only those classes,
-    *frames* only those frame indices, *limit* at most that many events.
-    Returns the new event ids (the project is not saved).
+    *frames* only those frame indices, *limit* at most that many events --
+    or *per_class* ``{class_name: n}``, at most *n* events of each class.
+
+    ``order="first"`` takes them from the first frame on.  ``order="random"``
+    draws them at random with *seed* (the same seed, file and project give
+    the same events), *n* boxes of a class from *n* different frames where
+    the video has them; a box that is an event of this source already (same
+    frame and class, IoU >= 0.9) is not drawn again, so a second draw adds
+    other boxes.  See :func:`yoru_explain.io.detections_csv.choose_detections`.
+    Returns the new event ids, in frame order (the project is not saved).
     """
-    from yoru_explain.io.detections_csv import load_detections_csv
+    from yoru_explain.io.detections_csv import choose_detections, load_detections_csv
 
     s = project.source(source_id)
     _, by_frame = load_detections_csv(csv_path)
-    keep_classes = set(class_names) if class_names else None
-    keep_frames = set(int(f) for f in frames) if frames is not None else None
+    skip = _is_event_already(project, source_id) if order == "random" else None
+    chosen = choose_detections(by_frame, class_names=class_names or None, frames=frames,
+                               limit=limit, per_class=per_class, order=order, seed=seed, skip=skip)
     added = []
-    for frame_index in sorted(by_frame):
-        if keep_frames is not None and frame_index not in keep_frames:
-            continue
-        for imported in by_frame[frame_index]:
-            d = imported.detection
-            if keep_classes is not None and d.class_name not in keep_classes:
-                continue
-            if limit is not None and len(added) >= limit:
-                return added
-            frame = FrameRef(source_id, s["path"], s["kind"], frame_index, int(s["width"]),
-                             int(s["height"]), None, bool(s["v_flip"]), bool(s["h_flip"]), None, "unread")
-            target = ExplanationTarget("", frame, d, -1, d.class_id, model_id=model_id,
-                                       track_id=imported.track_id, origin="csv_import")
-            added.append(project.add_event(target, note))
+    for imported in chosen:
+        d = imported.detection
+        frame = FrameRef(source_id, s["path"], s["kind"], imported.frame_index, int(s["width"]),
+                         int(s["height"]), None, bool(s["v_flip"]), bool(s["h_flip"]), None, "unread")
+        target = ExplanationTarget("", frame, d, -1, d.class_id, model_id=model_id,
+                                   track_id=imported.track_id, origin="csv_import")
+        added.append(project.add_event(target, note))
     return added
+
+
+def _is_event_already(project: Project, source_id: str):
+    """``ImportedDetection -> bool``: the box is an event of *source_id* already."""
+    from yoru_explain.core.geometry import overlap
+
+    existing: dict = {}
+    for e in project.events:
+        if e["source_id"] == source_id:
+            t = project.target(e["event_id"])
+            existing.setdefault((t.frame.frame_index, t.detection.class_id), []).append(t.detection)
+
+    def skip(imported) -> bool:
+        d = imported.detection
+        return any(overlap(d.box, x.box, d.obb, x.obb) >= 0.9
+                   for x in existing.get((imported.frame_index, d.class_id), ()))
+
+    return skip
 
 
 def explain(adapter, image: np.ndarray, target: ExplanationTarget,

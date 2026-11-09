@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) YORU contributors — see LICENSE for details.
 
-"""Statistics tab (v0.1): what each run did, event by event.
+"""Results tab (step 4; "statistics", v0.1): what each run did, event by event.
 
 Counts and per-event values only.  No test is run and no population summary
 is drawn: frames of one video are not independent samples, and a group
@@ -43,16 +43,16 @@ class StatisticsTab:
         themes = self.app.themes
         with dpg.group(horizontal=True):
             dpg.add_text("Run")
-            dpg.add_combo([], tag="stat_run", width=-330, callback=lambda: self.show_run())
-            dpg.add_button(label="Refresh", callback=lambda: self.state.runs_changed())
+            dpg.add_combo([], tag="stat_run", width=-170, callback=lambda: self.show_run())
             dpg.add_button(label="Open run folder", callback=lambda: self.open_folder())
         dpg.add_text("", tag="stat_summary", wrap=1000)
         muted(NOTE, themes, tag="stat_note", wrap=1000)
         dpg.add_separator()
         self.table.build()
         with dpg.group(horizontal=True):
-            dpg.add_button(label="View in Explore", callback=lambda: self._open_selected())
-            muted("or double-click a row; click a header to sort", themes)
+            dpg.add_button(label="Show on the frame", callback=lambda: self._open_selected())
+            muted("or double-click a row: its map is shown in 2 Pick events. Click a header to sort.",
+                  themes)
         self.refresh()
 
     def layout(self, width: int, height: int) -> None:
@@ -93,7 +93,7 @@ class StatisticsTab:
     def show_run(self):
         reader = self._reader()
         if reader is None:
-            dpg.set_value("stat_summary", "No runs yet.")
+            dpg.set_value("stat_summary", "No runs yet: run an analysis in 3 Analyze.")
             self.table.set_rows([])
             return
         m = reader.manifest

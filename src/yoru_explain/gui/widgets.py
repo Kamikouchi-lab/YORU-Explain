@@ -242,6 +242,10 @@ class Popups:
                           no_collapse=True, pos=_centre(width, 240),
                           on_close=lambda s: self.close(s))
 
+    def is_open(self, tag) -> bool:
+        """Whether popup *tag* is on screen or waiting to be."""
+        return tag in self.showing or any(t == tag for t, _ in self._queue)
+
     # -- the kinds ---------------------------------------------------------------
 
     def message(self, title: str, text: str, *, kind: str = "info") -> int:
@@ -298,6 +302,20 @@ class Popups:
                     dpg.add_button(label="Cancel", width=90, callback=lambda: self.close(tag))
 
         return self._request("form", title, ", ".join(label for _, label, _ in fields), build)
+
+    def dialog(self, title: str, build: Callable[[int], None], *, width: int = WIDTH,
+               text: str = "") -> int:
+        """A modal whose contents ``build(tag)`` adds; its buttons call :meth:`close`.
+
+        For dialogs a plain :meth:`form` cannot express (choices that depend
+        on a chosen file, several actions).  *text* is what :attr:`shown`
+        records.
+        """
+        def outer(tag):
+            with self._window(tag, title, width):
+                build(tag)
+
+        return self._request("dialog", title, text or title, outer)
 
     def error(self, title: str, exc_or_text) -> int:
         """Show an error with its traceback (folded), and log it."""

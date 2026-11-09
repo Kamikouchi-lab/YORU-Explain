@@ -1,27 +1,50 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) YORU contributors — see LICENSE for details.
 
-"""Explore tab: browse frames, pick a detection, look at its results.
+"""Pick events tab (step 2): browse frames, pick detections, look at their results.
 
 Frames are decoded exactly (in order, or by a seek verified against
 presentation times) on a worker thread, and the loaded model runs on each
 shown frame, so the boxes are the detector's own.  Clicking a box selects
-it; "Add as event" stores it -- with its pre-NMS candidate and the frame's
-hash -- for analysis.
+it; "Add selected as event" stores it -- with its pre-NMS candidate and the
+frame's hash -- for analysis.  A YORU detections CSV gives events in bulk
+(Import from YORU CSV...): from the first frame on or at random, so many in
+all or so many of each class; its boxes are drawn in light blue.
 """
 
 from __future__ import annotations
 
+import logging
 import math
+import random
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import dearpygui.dearpygui as dpg
 
+from yoru_explain.gui import widgets
 from yoru_explain.gui.frame_view import VIEW_MODES, FrameView, compose, map_value, pick_box
 from yoru_explain.gui.widgets import SelectTable, fmt, muted, tooltip
 from yoru_explain.gui.worker import FrameRequest
+
+#: What each detections-CSV layout is, in words.
+CSV_LAYOUTS = {
+    "yoru-analysis": "YORU video-analysis CSV",
+    "yoru-tracker": "YORU-Tracker detections CSV",
+    "yoru-tracker-tracks": "YORU-Tracker tracks CSV",
+}
+CSV_DIALOG_W = 620
+ALL_FRAMES = "every frame"
+#: The import dialog's "Pick" and "How many" choices.
+FIRST = "from the first frame on"
+RANDOM = "at random"
+IN_TOTAL = "in total"
+PER_CLASS = "per class"
+PER_CLASS_DEFAULT = 10
+
+logger = logging.getLogger("yoru_explain.gui")
 
 DISCLAIMER = ("Perturbation effects and attributions describe the model's score for this detection. "
               "They are not a biological interpretation.")
@@ -59,6 +82,9 @@ class ExploreTab:
         self._shown: Tuple[Optional[object], str] = (None, "delta")   # (map values, kind)
         self._info_lines: List[Tuple[str, Optional[int]]] = []
         self._wrap = 520
+        self._project_ref = None     # the project whose sources _indexed describes
+        #: The open "Import from YORU CSV" dialog's widgets (tests drive them).
+        self.csv_form: Dict[str, object] = {}
         self.view = FrameView("exp_view", app.themes, on_click=self._clicked)
         self.det_table = SelectTable("exp_dets", ["#", "class", "score", "box (x1, y1, x2, y2)",
                                                   "candidate"],
@@ -66,7 +92,7 @@ class ExploreTab:
         self.events = SelectTable("exp_events", ["event", "source", "frame", "class", "score",
                                                  "candidate", "origin", "note"],
                                   multi=True, height=200, sortable=True,
-                                  on_select=lambda keys: self._events_selected(),
+                                  on_select=lambda keys: self._events_clicked(keys),
                                   on_activate=lambda key: self.goto_selected_event())
         st = self.state
         st.projectChanged.connect(self.refresh_sources)
@@ -117,28 +143,38 @@ class ExploreTab:
                                "right-drag zooms into a box.")
                     muted("", themes, tag="exp_hover")
                 dpg.add_text("", tag="exp_frame_info")
+                with dpg.group(horizontal=True, tag="exp_csv_row", show=False):
+                    muted("", themes, tag="exp_csv_info")
+                    b = dpg.add_button(label="Detach", tag="exp_csv_detach", small=True,
+                                       callback=lambda: self.detach_csv())
+                    tooltip(b, "Stop drawing this CSV's boxes. Events already imported from it stay.")
             with dpg.child_window(tag="exp_right", border=False):
                 t = dpg.add_text("Detections on this frame")
                 dpg.bind_item_theme(t, themes.header)
-                muted("click a box or a row", themes)
+                muted("Click a box on the frame (or a row here), then add it as an event.", themes,
+                      tag="exp_dets_help")
                 self.det_table.build()
                 with dpg.group(horizontal=True):
-                    dpg.add_button(label="Add selected as event", callback=lambda: self.add_events(False))
-                    dpg.add_button(label="Add all on frame", callback=lambda: self.add_events(True))
-                    b = dpg.add_button(label="Add CSV boxes on frame",
-                                       callback=lambda: self.add_csv_events())
-                    tooltip(b, "The light-blue boxes of an attached YORU CSV, as events; a run "
-                               "finds each again with the loaded model (same class, IoU >= 0.9)")
+                    b = dpg.add_button(label="Add selected as event", tag="exp_add",
+                                       callback=lambda: self.add_events(False))
+                    dpg.bind_item_theme(b, themes.primary_button)
+                    dpg.add_button(label="Add all on this frame", callback=lambda: self.add_events(True))
+                    b = dpg.add_button(label="Import from YORU CSV...", tag="exp_import",
+                                       callback=lambda: self.import_csv())
+                    tooltip(b, "Make events in bulk from the detections YORU saved for this video "
+                               "(its video-analysis <video>.csv, or YORU-Tracker's tracks / "
+                               "detections CSV). You choose the classes, the frames, and how "
+                               "many: from the first frame on or at random, in total or per "
+                               "class.")
                 dpg.add_input_text(tag="exp_note", hint="note for new events (optional)", width=-1)
                 dpg.add_spacer(height=4)
-                t = dpg.add_text("Events")
+                t = dpg.add_text("Events", tag="exp_events_title")
                 dpg.bind_item_theme(t, themes.header)
-                muted("the selection is what Analyze runs on; Ctrl/Shift-click for several, "
-                      "double-click to go to the frame", themes, tag="exp_events_help")
+                muted("Select the events to analyse in 3 Analyze: click one to see its frame, "
+                      "Ctrl/Shift-click to select several.", themes, tag="exp_events_help")
                 self.events.build()
-                with dpg.group(horizontal=True):
-                    dpg.add_button(label="Go to frame", callback=lambda: self.goto_selected_event())
-                    dpg.add_button(label="Remove selected events", callback=lambda: self.remove_events())
+                b = dpg.add_button(label="Remove selected events", callback=lambda: self.remove_events())
+                tooltip(b, "Results of earlier runs stay on disk.")
                 dpg.add_spacer(height=4)
                 t = dpg.add_text("Results of the selected event")
                 dpg.bind_item_theme(t, themes.header)
@@ -153,15 +189,16 @@ class ExploreTab:
         right = max(300, width - left - 16)
         dpg.configure_item("exp_left", width=left, height=height)
         dpg.configure_item("exp_right", width=right, height=height)
-        plot_h = max(160, height - 96)
+        plot_h = max(160, height - (124 if dpg.is_item_shown("exp_csv_row") else 96))
         scale = SCALE_W + 8 if dpg.is_item_shown("exp_scale_group") else 0
         self.view.resize(left - scale - 8, plot_h)
         dpg.configure_item("exp_scale", height=plot_h)
-        rest = max(300, height - 300)
+        rest = max(300, height - 320)
         self.det_table.height = max(90, int(rest * 0.32))
         dpg.configure_item(self.det_table.tag, height=self.det_table.height)
         dpg.configure_item(self.events.tag, height=max(110, int(rest * 0.42)))
-        dpg.configure_item("exp_events_help", wrap=right - 10)
+        for tag in ("exp_events_help", "exp_dets_help"):
+            dpg.configure_item(tag, wrap=right - 10)
         self._wrap = right - 30
         self._render_info()
         self._layout_size = (width, height)
@@ -202,13 +239,31 @@ class ExploreTab:
             self._select_source(previous["source_id"])
         else:
             dpg.set_value("exp_source", self._source_labels[0] if self._source_labels else "")
-        self._indexed.clear()
+        if p is not self._project_ref:
+            # Another project: the frame service forgot its readers and their time indexes.
+            self._project_ref = p
+            self._indexed.clear()
+        else:
+            # The same project changed (a source added or removed, a CSV attached):
+            # the time indexes of the sources still there stay valid.
+            self._indexed = {k: v for k, v in self._indexed.items() if k in self._source_ids}
         self._imported.clear()
         self._source_changed(keep_index=keep)
+
+    def show_source(self, source_id: str) -> None:
+        """Show *source_id* (from its first frame unless it is already shown)."""
+        s = self._current_source()
+        if s is not None and s["source_id"] == source_id:
+            return
+        if self._select_source(source_id):
+            self._source_changed()
 
     def _source_changed(self, keep_index: bool = False):
         s = self._current_source()
         n = max(0, int(s.get("frame_count") or 1) - 1) if s else 0
+        summary = self._indexed.get(s["source_id"], {}) if s else {}
+        if summary.get("status") == "ok":
+            n = int(summary["frames"]) - 1   # the decoded frame count, not the container's estimate
         self._max_index = n
         dpg.configure_item("exp_slider", max_value=n)
         dpg.configure_item("exp_index", max_value=n)
@@ -221,14 +276,29 @@ class ExploreTab:
         self.view.set_image(None)
         self._fill_detections()
         if s is None:
-            dpg.set_value("exp_frame_info", "No source." if self.state.project is not None
-                          else "Open a project in the Project tab.")
+            dpg.set_value("exp_frame_info", "No video or image: add one in 1 Project."
+                          if self.state.project is not None else
+                          "Create or load a project in 1 Project.")
+            self._show_csv_row(None)
             return
         if s["kind"] == "video" and s["source_id"] not in self._indexed:
             self._indexed[s["source_id"]] = {"status": "building"}
             self.state.frames.build_index(self._req(s, 0))
         self._load_imported(s)
+        self._show_csv_row(s)
         self._request_frame()
+
+    def _show_csv_row(self, s) -> None:
+        files = (s or {}).get("detections_files") or []
+        if files:
+            n = sum(int(e.get("detections") or 0) for e in files)
+            names = ", ".join(Path(e["path"]).name for e in files)
+            dpg.set_value("exp_csv_info", f"Light-blue boxes: {n} detections from {names}")
+        if bool(files) != dpg.is_item_shown("exp_csv_row"):
+            dpg.configure_item("exp_csv_row", show=bool(files))
+            size = getattr(self, "_layout_size", None)
+            if size is not None:
+                self.layout(*size)
 
     def _load_imported(self, s):
         from yoru_explain.io.detections_csv import load_detections_csv
@@ -361,8 +431,15 @@ class ExploreTab:
         from yoru_explain import api
 
         p, a, f, s = self.state.project, self.state.adapter, self.frame, self._current_source()
-        if p is None or a is None or f is None or s is None:
-            self.popups.message("YORU-Explain", "Open a project, load a model and show a frame first.")
+        if p is None or s is None:
+            self.popups.message("YORU-Explain", "Add a video or image in 1 Project first.")
+            return
+        if a is None:
+            self.popups.message("YORU-Explain", "Load a model in 1 Project first: its detections are "
+                                                "the boxes you pick here.")
+            return
+        if f is None:
+            self.popups.message("YORU-Explain", "Wait until the frame is shown.")
             return
         if self._det_adapter is not a:
             # Detections of a model that is no longer the loaded one: refresh first.
@@ -373,8 +450,10 @@ class ExploreTab:
         idx = list(range(len(self.detections))) if all_on_frame else (
             [self.selected] if self.selected is not None else [])
         if not idx:
-            self.popups.message("YORU-Explain", "Select a detection first.")
+            self.popups.message("YORU-Explain", "No detection on this frame." if all_on_frame else
+                                "Click a box on the frame (or a row in the list) first.")
             return
+        added = []
         try:
             for i in idx:
                 t = api.target_from_detection(
@@ -382,32 +461,234 @@ class ExploreTab:
                     kind=s["kind"], frame_index=f.frame_index, timestamp_ms=f.timestamp_ms,
                     v_flip=s["v_flip"], h_flip=s["h_flip"], model_id=self.state.model_id or "",
                     access=f.access, frame_sha1=f.sha1)
-                p.add_event(t, dpg.get_value("exp_note").strip())
+                added.append(p.add_event(t, dpg.get_value("exp_note").strip()))
             p.save()
         except Exception as e:
             self.popups.error("Add event", e)
         self.state.eventsChanged.emit()
+        if added:
+            # New events join the selection, so 3 Analyze runs them next.
+            self.events.select(self.events.selected + added)
+            self._events_selected()
 
-    def add_csv_events(self):
+    # -- a YORU detections CSV ----------------------------------------------------------
+
+    def _suggested_csv(self, s) -> Optional[str]:
+        """The CSV to start the file dialog from: one attached, or YORU's ``<video>.csv``."""
+        files = s.get("detections_files") or []
+        if files:
+            return files[-1]["path"]
+        beside = Path(s["path"]).with_suffix(".csv")
+        return str(beside) if beside.is_file() else s["path"]
+
+    def import_csv(self, path: Optional[str] = None) -> Optional[int]:
+        """Choose a YORU detections CSV for the shown video, then what to import (a dialog)."""
+        from yoru_explain.io.detections_csv import load_detections_csv
+
+        p, s = self.state.project, self._current_source()
+        if p is None or s is None:
+            self.popups.message("Import from YORU CSV", "Add a video in 1 Project and show it here first.")
+            return None
+        f = path or widgets.ask_open_file(f"YORU detections CSV for {Path(s['path']).name}",
+                                          widgets.CSV_TYPES, current=self._suggested_csv(s))
+        if not f:
+            return None
+        try:
+            layout, by_frame = load_detections_csv(f)
+        except Exception as e:
+            self.popups.error("Import from YORU CSV", e)
+            return None
+        counts = Counter(x.detection.class_name for v in by_frame.values() for x in v)
+        on_frames: Dict[str, set] = {}
+        for k, v in by_frame.items():
+            for x in v:
+                on_frames.setdefault(x.detection.class_name, set()).add(k)
+        total = sum(counts.values())
+        frame_index = self.frame.frame_index if self.frame is not None else None
+        on_frame = len(by_frame.get(frame_index, [])) if frame_index is not None else 0
+        form: Dict[str, object] = {"path": str(f), "source_id": s["source_id"], "classes": {},
+                                   "per_class": {}, "frame_index": frame_index}
+        self.csv_form = form
+        themes = self.app.themes
+        wrap = CSV_DIALOG_W - 30
+
+        def build(tag):
+            form["tag"] = tag
+            dpg.add_text(Path(f).name)
+            dpg.bind_item_theme(dpg.last_item(), themes.header)
+            muted(f"{CSV_LAYOUTS.get(layout, layout)}: {total} detections on {len(by_frame)} frames. "
+                  f"Video: {s['source_id']} {Path(s['path']).name}", themes, wrap=wrap)
+            dpg.add_spacer(height=4)
+            dpg.add_text("Classes to import")
+            for name, n in sorted(counts.items()):
+                nf = len(on_frames[name])
+                with dpg.group(horizontal=True):
+                    # Shown with "per class": how many events of this class.
+                    form["per_class"][name] = dpg.add_input_int(
+                        default_value=min(PER_CLASS_DEFAULT, nf), min_value=0, min_clamped=True,
+                        step=0, width=70, show=False)
+                    form["classes"][name] = dpg.add_checkbox(
+                        label=f"{name}  ({n} boxes on {nf} frames)", default_value=True)
+            if not counts:
+                muted("The file holds no detections.", themes)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Frames  ")
+                items = [ALL_FRAMES]
+                if frame_index is not None:
+                    items.append(f"only the frame shown now ({frame_index}: {on_frame} boxes)")
+                form["frames"] = dpg.add_radio_button(items, default_value=ALL_FRAMES, horizontal=True)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Pick    ")
+                form["order"] = dpg.add_radio_button([FIRST, RANDOM], default_value=FIRST,
+                                                     horizontal=True,
+                                                     callback=lambda: self._csv_form_changed())
+            with dpg.group(horizontal=True):
+                dpg.add_text("How many")
+                form["number"] = dpg.add_radio_button([IN_TOTAL, PER_CLASS], default_value=IN_TOTAL,
+                                                      horizontal=True,
+                                                      callback=lambda: self._csv_form_changed())
+            with dpg.group(horizontal=True) as row:
+                form["limit_row"] = row
+                dpg.add_text("At most")
+                form["limit"] = dpg.add_input_int(default_value=min(100, max(1, total)), min_value=1,
+                                                  min_clamped=True, step=0, width=120)
+                dpg.add_text("events")
+            form["per_class_help"] = muted("Set the number of events beside each class (0 or "
+                                           "unticked: none).", themes, wrap=wrap, show=False)
+            with dpg.group(show=False) as group:
+                form["random_rows"] = group
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Seed")
+                    form["seed"] = dpg.add_input_int(default_value=random.randrange(1, 1_000_000),
+                                                     step=0, width=120)
+                    muted("the same seed draws the same boxes", themes)
+                muted("At random: n boxes of a class come from n different frames as long as the "
+                      "chosen frames hold that many. Boxes that are events already are not drawn "
+                      "again, so drawing again adds other boxes.", themes, wrap=wrap)
+            dpg.add_spacer(height=4)
+            muted("YORU's CSV does not record the model or its settings, so each imported box is "
+                  "only a pointer: before it is analysed, the loaded model is run on its frame and "
+                  "must find the same box again (same class, IoU >= 0.9), or the event fails with "
+                  "target_not_reproduced. The CSV's boxes are drawn in light blue on the frames.",
+                  themes, wrap=wrap)
+            dpg.add_spacer(height=6)
+            with dpg.group(horizontal=True):
+                b = dpg.add_button(label="Import events", callback=lambda: self._accept_csv_form(True))
+                dpg.bind_item_theme(b, themes.primary_button)
+                b = dpg.add_button(label="Only show the boxes",
+                                   callback=lambda: self._accept_csv_form(False))
+                tooltip(b, "Draw the CSV's boxes on the frames without making events.")
+                dpg.add_button(label="Cancel", width=90, callback=lambda: self.popups.close(tag))
+
+        return self.popups.dialog("Import from YORU CSV", build, width=CSV_DIALOG_W, text=str(f))
+
+    def _csv_form_changed(self) -> None:
+        """Show the inputs the chosen "Pick" and "How many" use."""
+        form, g = self.csv_form, dpg.get_value
+        per_class = g(form["number"]) == PER_CLASS
+        for item in form["per_class"].values():
+            dpg.configure_item(item, show=per_class)
+        dpg.configure_item(form["per_class_help"], show=per_class)
+        dpg.configure_item(form["limit_row"], show=not per_class)
+        dpg.configure_item(form["random_rows"], show=g(form["order"]) == RANDOM)
+
+    def _accept_csv_form(self, make_events: bool) -> None:
+        form, g = self.csv_form, dpg.get_value
+        classes = [name for name, item in form["classes"].items() if g(item)]
+        only_frame = g(form["frames"]) != ALL_FRAMES and form["frame_index"] is not None
+        at_random = g(form["order"]) == RANDOM
+        per_class = None
+        if g(form["number"]) == PER_CLASS:
+            per_class = {name: max(0, int(g(form["per_class"][name]))) for name in classes}
+        limit = max(1, int(g(form["limit"]))) if per_class is None else None
+        self.popups.close(form["tag"])
+        self.import_csv_events(form["source_id"], form["path"], make_events=make_events,
+                               class_names=classes, frames=[form["frame_index"]] if only_frame else None,
+                               limit=limit, per_class=per_class,
+                               order="random" if at_random else "first",
+                               seed=int(g(form["seed"])) if at_random else None)
+
+    def import_csv_events(self, source_id: str, csv_path: str, *, make_events: bool = True,
+                          class_names=None, frames=None, limit: Optional[int] = None,
+                          per_class: Optional[Dict[str, int]] = None, order: str = "first",
+                          seed: Optional[int] = None) -> List[str]:
+        """Attach the CSV to the source (its boxes are drawn) and add its detections as events.
+
+        *per_class* ``{class_name: n}`` asks for *n* events of each class (of
+        the ticked *class_names*) instead of *limit* in all; ``order="random"``
+        draws them at random with *seed* (see
+        :func:`yoru_explain.api.add_events_from_detections_csv`).
+        """
         from yoru_explain import api
 
-        p, f, s = self.state.project, self.frame, self._current_source()
-        imported = self._imported.get(s["source_id"], {}).get(f.frame_index, []) if (f and s) else []
-        if p is None or not imported:
-            self.popups.message("YORU-Explain", "No CSV boxes on this frame.")
-            return
+        p = self.state.project
+        added: List[str] = []
         try:
-            for x in imported:
-                t = api.target_from_detection(
-                    x.detection, -1, f.image, source_id=s["source_id"], path=s["path"], kind=s["kind"],
-                    frame_index=f.frame_index, timestamp_ms=f.timestamp_ms, v_flip=s["v_flip"],
-                    h_flip=s["h_flip"], model_id=self.state.model_id or "", access=f.access,
-                    frame_sha1=f.sha1, origin="csv_import")
-                p.add_event(t, dpg.get_value("exp_note").strip())
+            p.attach_detections(source_id, csv_path)
+            if make_events and class_names is not None and not class_names:
+                self.popups.message("Import from YORU CSV", "No class was ticked; no event was added.")
+                make_events = False
+            if make_events and per_class is not None:
+                per_class = {k: int(n) for k, n in per_class.items()
+                             if int(n) > 0 and (class_names is None or k in class_names)}
+                if not per_class:
+                    self.popups.message("Import from YORU CSV", "Every ticked class is set to 0 "
+                                                                "events; no event was added.")
+                    make_events = False
+            if make_events:
+                added = api.add_events_from_detections_csv(
+                    p, source_id, csv_path, model_id=self.state.model_id or "",
+                    class_names=(class_names or None) if per_class is None else None,
+                    frames=frames, limit=limit, per_class=per_class, order=order, seed=seed,
+                    note=dpg.get_value("exp_note").strip())
+                if order == "random":
+                    logger.info("drew %d event(s) at random from %s for %s: seed %s, %s, frames %s",
+                                len(added), Path(csv_path).name, source_id, seed,
+                                f"per class {per_class}" if per_class is not None else
+                                f"at most {limit} of {class_names or 'every class'}",
+                                frames if frames is not None else "all")
             p.save()
         except Exception as e:
-            self.popups.error("Add CSV events", e)
-        self.state.eventsChanged.emit()
+            self.popups.error("Import from YORU CSV", e)
+        self.state.projectChanged.emit()   # the CSV's boxes, and the Project table's CSV column
+        if make_events:
+            self.state.eventsChanged.emit()
+            if added:
+                # Selected, so 3 Analyze runs them next (the list's title counts them).
+                self.events.select(added)
+                self._events_selected()
+                self._report_short(added, per_class, order)
+            else:
+                self.popups.message("Import from YORU CSV", "No detection of the ticked classes "
+                                    "(on the chosen frames) is in the file" +
+                                    (" that is not an event already" if order == "random" else "") +
+                                    "; no event was added.")
+        return added
+
+    def _report_short(self, added: List[str], per_class: Optional[Dict[str, int]],
+                      order: str) -> None:
+        """Say which classes got fewer events than asked for."""
+        if not per_class:
+            return
+        got = Counter(self.state.project.event(e)["class_name"] for e in added)
+        short = [f"{name}: {got.get(name, 0)} of {n}" for name, n in sorted(per_class.items())
+                 if got.get(name, 0) < n]
+        if short:
+            more = " that are not events already" if order == "random" else ""
+            self.popups.message("Import from YORU CSV",
+                                f"Added {len(added)} events. Fewer than asked for ({'; '.join(short)}): "
+                                f"the chosen frames hold no more boxes of those classes{more}.")
+
+    def detach_csv(self) -> None:
+        p, s = self.state.project, self._current_source()
+        if p is None or s is None:
+            return
+        try:
+            p.detach_detections(s["source_id"])
+            p.save()
+        except Exception as e:
+            self.popups.error("Detach CSV", e)
+        self.state.projectChanged.emit()
 
     # -- events -----------------------------------------------------------------------
 
@@ -437,9 +718,16 @@ class ExploreTab:
         self.popups.confirm("Remove events", f"Remove {len(ids)} event(s)? Existing run results "
                                              "stay on disk.", remove, yes="Remove")
 
+    def _events_clicked(self, keys):
+        self._events_selected()
+        if len(keys) == 1:
+            self.goto_selected_event()   # one event selected: show it on its frame
+
     def _events_selected(self):
         ids = self.events.selected
-        self.state.selected_events = ids
+        self.state.select_events(ids)
+        n = self.events.row_count
+        dpg.set_value("exp_events_title", f"Events ({n}, {len(ids)} selected)" if n else "Events")
         self._result_data, self._result_labels = [], []
         if len(ids) == 1:
             for reader, row in self.state.results_for(ids[0]):

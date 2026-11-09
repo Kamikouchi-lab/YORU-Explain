@@ -96,31 +96,53 @@ CPU), DearPyGui 1.11.1. Other platforms are untested.
 
 ## Use
 
-**GUI** (`uv run python -m yoru_explain`):
+**GUI** (`uv run python -m yoru_explain`). The tabs are numbered in the order
+of the work, and the **Next:** line above them always says what to do next
+(with a button to the tab where it is done). Everything is saved as it
+changes.
 
-1. *Project* — create a project folder, add videos/images (with YORU's
-   `v_flip`/`h_flip` if they were used), add a model (type `auto` picks the
-   backend YORU would; *black box* explains YORU's `detect()` only), *Load
-   selected model*.
-   Optionally attach a detections CSV — YORU's video-analysis `<video>.csv`, or
-   YORU-Tracker's `*_tracks.csv` / `*_detections.csv` (a track's events keep
-   its `track_id`; set the flips its `*_tracks.json` records): its boxes are
-   shown in light blue, and *Events from CSV...* turns them into events in
-   bulk (each is found again with the loaded model before it is analysed).
-   YORU's real-time `*_detect.csv` is not read directly; track it with
-   YORU-Tracker (with its `*_log.csv` beside it) and attach the tracks.
-2. *Explore* — move to a frame (slider, `<` `>`, or the arrow keys); the
-   loaded model's detections are drawn on the frame, whose axes are frame
+1. *1 Project* — *New project...* asks for a name and a location and makes
+   the folder `<location>/<name>`; *Load project...* opens an existing one.
+   *Add videos / images...* (tick YORU's `v_flip`/`h_flip` first if YORU used
+   them). *Add model...* asks for the weights file, then its type (`auto`
+   picks the backend YORU would; *black box* explains YORU's `detect()` only)
+   and YORU's thresholds, and loads it. *Remove* takes a video or model out of
+   the project (removing a video also removes the events picked on it; files
+   and run results are never deleted). *Load selected model* (or a
+   double-click) switches models.
+2. *2 Pick events* — move to a frame (slider, `<` `>`, or the arrow keys);
+   the loaded model's detections are drawn on the frame, whose axes are frame
    pixels (wheel zooms, drag pans, double-click fits). Click a box, *Add
-   selected as event*. Ctrl/Shift-click selects several events; double-click
-   one to go to its frame. Results of an event are shown as Original / Heatmap
-   / Overlay / Side by side, with the colour scale and the map's value under
+   selected as event*. Or *Import from YORU CSV...*: choose YORU's
+   video-analysis `<video>.csv` (or YORU-Tracker's `*_tracks.csv` /
+   `*_detections.csv`; a track's events keep its `track_id`), then which
+   classes and frames, and how many: *from the first frame on* or *at
+   random*, *in total* or *per class* (a number beside each class). At
+   random, n boxes of a class come from n different frames where the video
+   has them, boxes that are events already are not drawn again, and the
+   *Seed* makes a draw repeatable (it is written to the log). YORU's CSV does not record the
+   model or its settings, so each imported box is found again with the
+   loaded model before it is analysed; the CSV's boxes are drawn in light
+   blue (*Detach* stops that). YORU's real-time `*_detect.csv` is not read
+   directly; track it with YORU-Tracker and import the tracks. New events are
+   selected; click an event to see its frame, Ctrl/Shift-click to select
+   several. The selected event's results are shown as Original / Heatmap /
+   Overlay / Side by side, with the colour scale and the map's value under
    the mouse.
-3. *Analyze* — choose occlusion or Grad-CAM and the score, run the selected or
-   all events. Progress, cancel and the log are on the right; nothing blocks
-   the window.
-4. *Statistics* — per-event values of each run (descriptive only).
-5. *Settings* — device, logs, settings files, versions, capabilities.
+3. *3 Analyze* — choose occlusion or Grad-CAM and the score on the left
+   (only the settings the chosen baseline uses are shown; batch size and the
+   run options are under *Advanced*), then *Analyze N events (selected)* or
+   *Analyze all*. *Both methods* runs Grad-CAM and then occlusion on the same
+   events, as two runs, each with its own settings and the same score
+   (Grad-CAM, seconds per event, goes first, so its maps exist even if the
+   occlusion run is cancelled). Progress with the estimated time left,
+   cancel and the log are on the right; nothing blocks the window.
+4. *4 Results* — per-event values of each run (descriptive only);
+   double-click a row to see its map on the frame.
+
+*Settings* — device, logs, settings files, versions, capabilities. The
+*Project* menu also holds *Check seeking of the selected video* and *Add
+synthetic test model* (a detector of coloured squares with known answers).
 
 **Python** (the GUI calls the same functions):
 
@@ -171,7 +193,7 @@ Videos and weights are referenced by path and hash, never copied.
   torchvision, ONNX exports). It is **not** verified on the YORU paper's models
   or on models trained in YORU with the other backends (not available here).
   Every run repeats the check on its first frame.
-* 330 tests (synthetic known-answer tests, real-model integration for every
+* 341 tests (synthetic known-answer tests, real-model integration for every
   backend, the GUI in process), plus a real-window test with
   `YORU_EXPLAIN_GUI_WINDOW=1`; see [docs/VALIDATION.md](docs/VALIDATION.md) for
   what they establish. The integration tests' models are fetched or built by

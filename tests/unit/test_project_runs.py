@@ -267,6 +267,38 @@ def test_events_from_a_yoru_csv_in_bulk(setup, tmp_path):
     assert len(api.add_events_from_detections_csv(project, "src-001", path, limit=2)) == 2
 
 
+def test_events_drawn_at_random_per_class_from_a_yoru_csv(setup, tmp_path):
+    project, toy, model, events, video = setup      # events: red on frame 3, green on frame 25
+    path = tmp_path / "clip.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "x1", "y1", "x2", "y2", "x_center", "y_center", "w", "h", "angle",
+                    "confidence", "class", "class_name"])
+        with project.open_source("src-001") as r:
+            for frame in range(N_FRAMES):
+                for d in toy.detect(r.read(frame).image):
+                    x1, y1, x2, y2 = d.box
+                    w.writerow([frame, x1, y1, x2, y2, (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1,
+                                0, d.score, d.class_id, d.class_name])
+    draw = dict(model_id=model.model_id, order="random")
+    added = api.add_events_from_detections_csv(project, "src-001", path, per_class={"red": 5, "green": 3},
+                                               seed=11, **draw)
+    rows = [project.event(e) for e in added]
+    assert sorted(r["class_name"] for r in rows) == ["green"] * 3 + ["red"] * 5
+    assert len({(r["class_name"], r["frame_index"]) for r in rows}) == 8       # different frames
+    assert [int(r["frame_index"]) for r in rows] == sorted(int(r["frame_index"]) for r in rows)
+    assert all(r["origin"] == "csv_import" and r["frame_access"] == "unread" for r in rows)
+
+    # The boxes that are events already (the two picked ones, the eight drawn) are not drawn
+    # again: asking for every box adds the rest, once.
+    rest = api.add_events_from_detections_csv(project, "src-001", path, per_class={"red": 99, "green": 99},
+                                              seed=11, **draw)
+    assert len(rest) == 2 * N_FRAMES - 2 - 8
+    assert not api.add_events_from_detections_csv(project, "src-001", path, limit=5, seed=1, **draw)
+    seen = {(e["frame_index"], e["class_name"]) for e in project.events}
+    assert len(seen) == len(project.events) == 2 * N_FRAMES
+
+
 #: The header YORU-Tracker writes on a ``*_tracks.csv``: YORU's
 #: DETECTION_COLUMNS, then the tracking columns.  Copied from a file it wrote
 #: (YORU-Explain does not import YORU-Tracker).
@@ -400,3 +432,137 @@ def test_an_escaping_interrupt_leaves_a_failed_manifest(setup, monkeypatch):
         api.run_analysis(project, toy, model.model_id, events, REQ)
     (run_dir,) = project.run_dirs()
     assert RunReader(run_dir).manifest["status"] == "failed"
+
+
+def test_a_new_project_folder_is_named_and_placed_by_the_user(tmp_path):
+    from yoru_explain.io.project import new_project_folder
+
+    assert new_project_folder(" courtship ", tmp_path) == tmp_path / "courtship"
+    (tmp_path / "empty").mkdir()
+    assert new_project_folder("empty", tmp_path) == tmp_path / "empty"   # an empty folder is fine
+    (tmp_path / "used").mkdir()
+    (tmp_path / "used" / "notes.txt").write_text("x")
+    api.Project.create(tmp_path / "old")
+    for name, location, words in (("", tmp_path, "Enter a project name"),
+                                  ("a:b", tmp_path, "cannot contain"),
+                                  ("CON", tmp_path, "cannot be a folder name"),
+                                  ("x", tmp_path / "nowhere", "does not exist"),
+                                  ("x", "", "Choose the folder"),
+                                  ("used", tmp_path, "not empty"),
+                                  ("old", tmp_path, "already a project")):
+        with pytest.raises(ExplainError, match=words) as info:
+            new_project_folder(name, location)
+        assert info.value.code == ErrorCode.INVALID_CONFIG
+
+
+def test_removing_a_source_removes_its_events_and_its_id_is_never_reused(setup, tmp_path):
+    project, toy, model, events, video = setup
+    second = project.add_source(_video(tmp_path / "second.avi"))["source_id"]
+    e3 = api.add_event(project, toy, model.model_id, second, 3, _index_of(toy, project, second, 3, 0))
+    assert project.events_of_sources(["src-001"]) == events
+    removed = project.remove_sources(["src-001"])
+    assert removed == events
+    assert [e["event_id"] for e in project.events] == [e3]
+    assert [s["source_id"] for s in project.sources] == [second]
+    project.save()
+    again = api.Project.open(project.root)
+    gone = again.removed_entries("sources")
+    assert [s["source_id"] for s in gone] == ["src-001"] and gone[0]["removed"]
+    # Neither the removed id nor one an event names is given again.
+    assert again.add_source(video)["source_id"] == "src-003"
+    with pytest.raises(ExplainError):
+        again.remove_sources(["src-404"])
+
+
+def test_removing_a_model_keeps_its_events_and_its_id(setup, tmp_path):
+    project, toy, model, events, video = setup
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"weights")
+    other = project.add_model(weights, "yoru-yolov5", {"conf_thresh": 0.25})
+    assert other.model_id == "mdl-002"
+    assert project.remove_models([model.model_id]) == 1
+    assert [m.model_id for m in project.models] == ["mdl-002"]
+    assert [e["event_id"] for e in project.events] == events       # events stay
+    project.remove_models(["mdl-002"])
+    # mdl-001 is named by the events, mdl-002 is in `removed`: the next is mdl-003.
+    assert project.add_model(None, "toy-grid").model_id == "mdl-003"
+    project.save()
+    assert [m["model_id"] for m in api.Project.open(project.root).removed_entries("models")] == \
+        ["mdl-001", "mdl-002"]
+
+
+def test_a_detections_csv_is_attached_once_and_can_be_detached(setup, tmp_path):
+    project, toy, model, events, video = setup
+    path = tmp_path / "clip.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "x1", "y1", "x2", "y2", "x_center", "y_center", "w", "h", "angle",
+                    "confidence", "class", "class_name"])
+        w.writerow([2, 0, 0, 30, 30, 15, 15, 30, 30, 0, 0.9, 0, "red"])
+        w.writerow([4, 0, 0, 30, 30, 15, 15, 30, 30, 0, 0.8, 1, "green"])
+    entry = project.attach_detections("src-001", path)
+    assert entry == {"path": str(path.resolve()), "layout": "yoru-analysis", "frames": 2,
+                     "detections": 2}
+    project.attach_detections("src-001", str(path))
+    assert project.source("src-001")["detections_files"] == [entry]
+    assert project.detach_detections("src-001") == 1
+    assert project.source("src-001")["detections_files"] == []
+
+
+BOTH = [api.AnalysisRequest(m, occlusion=REQ.occlusion, use_cache=False) for m in api.BOTH_METHODS]
+
+
+def test_both_methods_run_one_after_the_other_as_two_runs(setup):
+    project, toy, model, events, _ = setup
+    seen = []
+    outs = api.run_analyses(project, toy, model.model_id, events, BOTH, progress=seen.append)
+    assert [RunReader(o.run_dir).config["method"] for o in outs] == ["gradcam", "occlusion"]
+    assert all(o.status == "completed" and o.counts == {"ok": 2} for o in outs)
+    assert len({o.run_dir for o in outs}) == 2 and len(project.run_dirs()) == 2
+    for o in outs:                                    # the same score, explained twice
+        assert {r["score_type"] for r in RunReader(o.run_dir).results} == {"confidence"}
+    # Each report says which run it is about; the runs do not overlap.
+    assert [p.method for p in seen] == sorted((p.method for p in seen), key=api.BOTH_METHODS.index)
+    assert {(p.run_index, p.n_runs, p.method) for p in seen} == {(0, 2, "gradcam"), (1, 2, "occlusion")}
+    assert all(0.0 <= p.fraction <= 1.0 for p in seen)
+
+
+def test_a_cancelled_run_is_the_last_one(setup):
+    project, toy, model, events, _ = setup
+    outs = api.run_analyses(project, toy, model.model_id, events, BOTH, cancel=lambda: True)
+    assert [o.status for o in outs] == ["cancelled"]
+    assert len(project.run_dirs()) == 1
+
+
+def test_cancelling_between_the_runs_starts_no_further_run(setup):
+    project, toy, model, events, _ = setup
+    last_event = []
+
+    def progress(p):
+        if p.method == "gradcam" and p.event_index == p.n_events - 1:
+            last_event.append(p)        # cancel while Grad-CAM's last event runs
+
+    outs = api.run_analyses(project, toy, model.model_id, events, BOTH, progress=progress,
+                            cancel=lambda: bool(last_event))
+    assert [o.status for o in outs] == ["completed"] and outs[0].counts == {"ok": 2}
+    assert len(project.run_dirs()) == 1
+
+
+def test_a_failed_run_ends_the_sequence(setup, monkeypatch):
+    project, toy, model, events, _ = setup
+    monkeypatch.setattr(toy, "identity_check", lambda image: {
+        "status": "failed", "reason": "simulated", "exact": False})
+    outs = api.run_analyses(project, toy, model.model_id, events, BOTH)
+    assert [o.status for o in outs] == ["failed"]
+    assert len(project.run_dirs()) == 1
+
+
+def test_a_request_the_adapter_refuses_stops_every_run_before_anything_is_written(setup):
+    project, toy, model, events, _ = setup
+    refused = api.AnalysisRequest("occlusion", occlusion=api.OcclusionConfig(
+        score=api.ScoreDefinition("cls_softmax")))            # torchvision's score, not YOLO's
+    with pytest.raises(ExplainError, match="cls_softmax"):
+        api.run_analyses(project, toy, model.model_id, events, [BOTH[0], refused])
+    assert project.run_dirs() == []
+    with pytest.raises(ValueError):
+        api.run_analyses(project, toy, model.model_id, events, [])
