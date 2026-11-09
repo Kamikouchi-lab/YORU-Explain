@@ -18,11 +18,12 @@ and runs that name it keep meaning what they meant.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.hashing import QUICK_ID_METHOD, quick_file_id, sha256_file
@@ -271,6 +272,90 @@ class Project:
     def open_source(self, source_id: str):
         s = self.source(source_id)
         return open_source(s["path"], v_flip=s["v_flip"], h_flip=s["h_flip"])
+
+    # -- experimental units ----------------------------------------------
+
+    def _source_entry(self, source_id: str) -> Optional[Dict[str, Any]]:
+        """A source of the project, or one taken out of it (runs may name it); None if unknown."""
+        for s in list(self.sources) + self.removed_entries("sources"):
+            if s["source_id"] == source_id:
+                return s
+        return None
+
+    def unit_of(self, source_id: str) -> Tuple[str, bool]:
+        """``(unit_id, assigned)``: the experimental unit the events of a source belong to.
+
+        The unit is what the experimenter treats as one independent sample
+        -- an animal, a pair, a cage -- and is set with :meth:`set_unit` or
+        :meth:`assign_units_from_csv`.  A source without one is its own unit:
+        ``(source_id, False)``.  Frames are never units.
+        """
+        s = self._source_entry(source_id)
+        unit = str((s or {}).get("unit_id") or "").strip()
+        return (unit, True) if unit else (source_id, False)
+
+    def set_unit(self, source_id: str, unit_id: Optional[str]) -> None:
+        """Put a source's events into experimental unit *unit_id* (``None`` / empty: unset).
+
+        Several sources may share a unit (the same animal filmed twice).
+        """
+        s = self.source(source_id)
+        unit = str(unit_id or "").strip()
+        if any(ord(c) < 32 for c in unit):
+            raise ExplainError(ErrorCode.INVALID_CONFIG, f"unit id {unit_id!r} holds a control character")
+        if unit:
+            s["unit_id"] = unit
+        else:
+            s.pop("unit_id", None)
+
+    def assign_units_from_csv(self, csv_path) -> Dict[str, Any]:
+        """Set the units of sources from a table with the columns ``video`` and ``unit_id``.
+
+        ``video`` names a source by its id (``src-001``), its full path, or its
+        file name (when only one source has that name).  Other columns (a
+        condition, a date, ...) are left for the experimenter's own analysis
+        and reported as ignored; rows naming no source of the project are
+        reported, not guessed.  Returns ``{"assigned": {source_id: unit_id},
+        "unmatched": [...], "ambiguous": [...], "ignored_columns": [...]}``.
+        """
+        path = Path(csv_path)
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            header = [h.strip() for h in next(reader, [])]
+            rows = [dict(zip(header, (c.strip() for c in line))) for line in reader
+                    if any(c.strip() for c in line)]
+        if "video" not in header or "unit_id" not in header:
+            raise ExplainError(ErrorCode.INVALID_CONFIG,
+                               f"{path.name}: needs the columns video and unit_id (has {', '.join(header)})")
+        by_id = {s["source_id"]: s for s in self.sources}
+        by_path = {os.path.normcase(str(Path(s["path"]).resolve())): s for s in self.sources}
+        by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for s in self.sources:
+            by_name.setdefault(os.path.normcase(Path(s["path"]).name), []).append(s)
+        assigned: Dict[str, str] = {}
+        unmatched: List[str] = []
+        ambiguous: List[str] = []
+        for row in rows:
+            video, unit = row.get("video", ""), row.get("unit_id", "")
+            if not video:
+                continue
+            s = by_id.get(video)
+            if s is None:
+                s = by_path.get(os.path.normcase(str(Path(video).resolve()))) if Path(video).is_absolute() \
+                    else None
+            if s is None:
+                named = by_name.get(os.path.normcase(Path(video).name), [])
+                if len(named) > 1:
+                    ambiguous.append(video)
+                    continue
+                s = named[0] if named else None
+            if s is None:
+                unmatched.append(video)
+                continue
+            self.set_unit(s["source_id"], unit or None)
+            assigned[s["source_id"]] = unit
+        return {"assigned": assigned, "unmatched": unmatched, "ambiguous": ambiguous,
+                "ignored_columns": [h for h in header if h not in ("video", "unit_id")]}
 
     def events_of_sources(self, source_ids: Iterable[str]) -> List[str]:
         """Ids of the events picked on these sources."""

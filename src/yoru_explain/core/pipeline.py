@@ -311,11 +311,14 @@ class ResultCache:
 def _preview_lines(request, target, result, score_text, method_label) -> List[str]:
     if request.method == "occlusion":
         c = request.occlusion
+        (ph, pw), (sy, sx) = result.patch_size, result.stride
+        relative = (f" ({c.patch_fraction:g} x target size {result.target_size:.0f} px)"
+                    if c.relative else "")
         return [
             f"{target.event_id}  frame {target.frame.frame_index}  {target.detection.class_name}  "
             f"score {result.reference_score:.4f} (reference {result.reference_score_batch:.4f})",
             f"explained: {score_text}",
-            f"occlusion {c.patch_size[0]}x{c.patch_size[1]} stride {c.stride[0]}x{c.stride[1]}, "
+            f"occlusion {ph}x{pw} stride {sy}x{sx}{relative}, "
             f"baseline {c.baseline.describe()}, region {c.region}, batch {c.batch_size}",
             method_label,
         ]
@@ -574,7 +577,7 @@ def _analyze_event(project, adapter, writer, request, target, source, readers, c
             readers[sid] = project.open_source(sid)
             inputs[sid] = {k: source.get(k) for k in (
                 "source_id", "path", "kind", "size", "quick_id", "quick_id_method", "width", "height",
-                "fps", "frame_count", "fourcc", "v_flip", "h_flip", "seek_check")}
+                "fps", "frame_count", "fourcc", "v_flip", "h_flip", "seek_check", "unit_id")}
             inputs[sid]["verify"] = project.verify_source(sid)
         frame = readers[sid].read(target.frame.frame_index, exact=True)
         if target.frame.frame_sha1 and frame.sha1 != target.frame.frame_sha1:

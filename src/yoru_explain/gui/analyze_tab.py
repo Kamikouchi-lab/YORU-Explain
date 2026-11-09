@@ -39,6 +39,12 @@ METHOD_NAMES = {"occlusion": "occlusion", "gradcam": "Grad-CAM"}
 BOTH_TIP = ("Grad-CAM, then occlusion, on the same events: two runs, each with its own settings on "
             "the left (select a method to see them) and the same score. Grad-CAM takes seconds and "
             "goes first, so its maps exist even if the occlusion run is cancelled.")
+PATCH_PX = "pixels"
+PATCH_FRACTION = "x target size"
+PATCH_UNIT_TIP = ("pixels: the same patch on every event. x target size: a square patch whose side is "
+                  "that fraction of the target's size sqrt(w*h) (of its rotated box for OBB models), "
+                  "rounded per event, so animals filmed at another magnification are tiled alike; the "
+                  "pixels used are recorded with each result.")
 
 
 def _bgr_text(bgr) -> str:
@@ -161,8 +167,20 @@ class AnalyzeTab:
 
         with dpg.group(tag="ana_occ"):
             widgets.heading("Occlusion", themes)
-            self._int_row("patch (px)", "ana_patch", 32, 2, 512, "Square patch size in frame pixels")
-            self._int_row("stride (px)", "ana_stride", 16, 1, 512)
+            with dpg.group(horizontal=True):
+                dpg.add_text("patch in ")
+                c = dpg.add_radio_button([PATCH_PX, PATCH_FRACTION], tag="ana_patch_unit",
+                                         default_value=PATCH_PX, horizontal=True,
+                                         callback=lambda: self._show_rows())
+                tooltip(c, PATCH_UNIT_TIP)
+            with dpg.group(tag="ana_px_rows"):
+                self._int_row("patch (px)", "ana_patch", 32, 2, 512, "Square patch size in frame pixels")
+                self._int_row("stride (px)", "ana_stride", 16, 1, 512)
+            with dpg.group(tag="ana_frac_rows", show=False):
+                self._float_row("patch", "ana_patch_frac", 0.25, 0.01, 4.0,
+                                "Patch side as a fraction of the target's size sqrt(w*h)")
+                self._float_row("stride", "ana_stride_frac", 0.125, 0.005, 4.0,
+                                "Step as a fraction of the target's size (half the patch by default)")
             with dpg.group(horizontal=True):
                 dpg.add_text("baseline   ")
                 c = dpg.add_combo(list(BASELINE_KINDS), tag="ana_baseline", default_value="constant",
@@ -237,6 +255,17 @@ class AnalyzeTab:
             if tip:
                 tooltip(item, tip)
 
+    @staticmethod
+    def _float_row(label, tag, default, lo, hi, tip=""):
+        with dpg.group(horizontal=True):
+            dpg.add_text(f"{label:<11}")
+            item = dpg.add_input_float(tag=tag, default_value=default, min_value=lo, max_value=hi,
+                                       min_clamped=True, max_clamped=True, step=0.025, format="%.3f",
+                                       width=140)
+            dpg.add_text("x target size")
+            if tip:
+                tooltip(item, tip)
+
     def layout(self, width: int, height: int) -> None:
         dpg.configure_item("ana_settings", height=height)
         right = max(300, width - SETTINGS_W - 16)
@@ -284,6 +313,9 @@ class AnalyzeTab:
         dpg.configure_item("ana_sigma_row", show=kind == "blur")
         dpg.configure_item("ana_seed_row", show=kind == "noise")
         dpg.configure_item("ana_context_row", show=dpg.get_value("ana_region") == "context")
+        relative = dpg.get_value("ana_patch_unit") == PATCH_FRACTION
+        dpg.configure_item("ana_px_rows", show=not relative)
+        dpg.configure_item("ana_frac_rows", show=relative)
 
     # -- the request -------------------------------------------------------------------
 
@@ -305,8 +337,11 @@ class AnalyzeTab:
 
         value = tuple(int(v) for v in str(dpg.get_value("ana_value")).replace(" ", "").split(","))
         g = dpg.get_value
+        relative = g("ana_patch_unit") == PATCH_FRACTION
         occ = OcclusionConfig(
             patch_size=int(g("ana_patch")), stride=int(g("ana_stride")),
+            patch_fraction=round(float(g("ana_patch_frac")), 4) if relative else None,
+            stride_fraction=round(float(g("ana_stride_frac")), 4) if relative else None,
             baseline=BaselineSpec(g("ana_baseline"), value, float(g("ana_sigma"))),
             region=g("ana_region"), context_scale=float(g("ana_context")),
             score=ScoreDefinition(g("ana_score"), self._occlusion_identity(),
@@ -326,6 +361,11 @@ class AnalyzeTab:
         s = dpg.set_value
         s("ana_patch", int(o.patch_size[0]))
         s("ana_stride", int(o.stride[0]))
+        s("ana_patch_unit", PATCH_FRACTION if o.relative else PATCH_PX)
+        if o.relative:
+            s("ana_patch_frac", float(o.patch_fraction))
+            s("ana_stride_frac", float(o.stride_fraction if o.stride_fraction is not None
+                                       else o.patch_fraction / 2))
         if o.baseline.kind in BASELINE_KINDS:
             s("ana_baseline", o.baseline.kind)
         s("ana_value", _bgr_text(o.baseline.value))

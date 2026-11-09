@@ -31,11 +31,12 @@ found again (same class, IoU >= 0.9); otherwise the event fails with
 
 from __future__ import annotations
 
+import bisect
 import csv
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.types import Detection
@@ -134,13 +135,38 @@ def load_detections_csv(path) -> Tuple[str, Dict[int, List[ImportedDetection]]]:
 ORDERS = ("first", "random")
 
 
-def _spread(items: list, n: int, rng: random.Random) -> list:
+class _Spacing:
+    """Keeps chosen detections of one class at least *gap* frames apart.
+
+    *taken* holds frames already used per class name (events picked
+    earlier); they count as chosen.  With a gap of 0 everything is admitted.
+    """
+
+    def __init__(self, gap: int, taken: Optional[Mapping[str, Iterable[int]]] = None):
+        self.gap = int(gap)
+        self._frames: Dict[str, List[int]] = {
+            str(k): sorted(int(f) for f in v) for k, v in (taken or {}).items()}
+
+    def admit(self, frame: int, class_name: str) -> bool:
+        """Whether a box of *class_name* on *frame* may be chosen; if so it is recorded."""
+        if self.gap > 0:
+            frames = self._frames.setdefault(class_name, [])
+            i = bisect.bisect_left(frames, frame)
+            if (i < len(frames) and frames[i] - frame < self.gap) or \
+                    (i > 0 and frame - frames[i - 1] < self.gap):
+                return False
+            frames.insert(i, frame)
+        return True
+
+
+def _spread(items: list, n: int, rng: random.Random, spacing: Optional[_Spacing] = None) -> list:
     """*n* of *items* (``(frame, position, detection)``) at random, spread over frames.
 
     The frames are shuffled and one box is taken from each in turn (a box
     at random on a frame with several), so *n* boxes come from *n*
     different frames whenever the items cover that many; only then does a
-    frame give a second box.
+    frame give a second box.  *spacing* passes over boxes too close in time
+    to one already chosen of the same class.
     """
     by_frame: Dict[int, list] = {}
     for item in items:
@@ -155,7 +181,11 @@ def _spread(items: list, n: int, rng: random.Random) -> list:
         layer = [by_frame[f][depth] for f in order if depth < len(by_frame[f])]
         if not layer:
             break
-        out.extend(layer[:n - len(out)])
+        for item in layer:
+            if len(out) >= n:
+                break
+            if spacing is None or spacing.admit(item[0], item[2].detection.class_name):
+                out.append(item)
         depth += 1
     return out
 
@@ -163,7 +193,8 @@ def _spread(items: list, n: int, rng: random.Random) -> list:
 def choose_detections(by_frame: Dict[int, List[ImportedDetection]], *, class_names=None,
                       frames=None, limit: Optional[int] = None,
                       per_class: Optional[Dict[str, int]] = None, order: str = "first",
-                      seed: Optional[int] = None, skip=None) -> List[ImportedDetection]:
+                      seed: Optional[int] = None, skip=None, min_gap_frames: int = 0,
+                      taken: Optional[Mapping[str, Iterable[int]]] = None) -> List[ImportedDetection]:
     """The detections of a :func:`load_detections_csv` table to make events of.
 
     *class_names* keeps only those classes, *frames* only those frame
@@ -178,11 +209,20 @@ def choose_detections(by_frame: Dict[int, List[ImportedDetection]], *, class_nam
     whenever the chosen frames hold that many (see :func:`_spread`).  The
     same file, choices and seed give the same detections.
 
+    *min_gap_frames* keeps the chosen boxes of one class at least that many
+    frames apart -- also from *taken* (``{class_name: frames}``, events
+    picked before) -- so that a burst of near-identical neighbouring frames
+    does not pass for many samples.  Fewer than asked come back when the
+    video has too few that far apart.
+
     Returned in frame order (and the file's order on a frame).
     """
     if order not in ORDERS:
         raise ExplainError(ErrorCode.INVALID_CONFIG,
                            f"order must be one of {', '.join(ORDERS)}, not {order!r}")
+    if int(min_gap_frames) < 0:
+        raise ExplainError(ErrorCode.INVALID_CONFIG, "min_gap_frames is negative")
+    spacing = _Spacing(min_gap_frames, taken) if int(min_gap_frames) > 0 else None
     if per_class is not None:
         if class_names is not None or limit is not None:
             raise ExplainError(ErrorCode.INVALID_CONFIG,
@@ -207,24 +247,33 @@ def choose_detections(by_frame: Dict[int, List[ImportedDetection]], *, class_nam
                 continue
             items.append((frame_index, pos, imported))
 
+    def admit(x) -> bool:
+        return spacing is None or spacing.admit(x[0], x[2].detection.class_name)
+
     if order == "random":
         rng = random.Random(seed)
         if per_class is not None:
             chosen = []
             for name in sorted(per_class):
                 of_class = [x for x in items if x[2].detection.class_name == name]
-                chosen += _spread(of_class, per_class[name], rng)
+                chosen += _spread(of_class, per_class[name], rng, spacing)
         else:
-            chosen = _spread(items, len(items) if limit is None else int(limit), rng)
+            chosen = _spread(items, len(items) if limit is None else int(limit), rng, spacing)
         chosen.sort(key=lambda x: (x[0], x[1]))
     elif per_class is not None:
-        taken: Dict[str, int] = {}
+        counts: Dict[str, int] = {}
         chosen = []
         for x in items:
             name = x[2].detection.class_name
-            if taken.get(name, 0) < per_class[name]:
-                taken[name] = taken.get(name, 0) + 1
+            if counts.get(name, 0) < per_class[name] and admit(x):
+                counts[name] = counts.get(name, 0) + 1
                 chosen.append(x)
     else:
-        chosen = items if limit is None else items[:int(limit)]
+        n = len(items) if limit is None else int(limit)
+        chosen = []
+        for x in items:
+            if len(chosen) >= n:
+                break
+            if admit(x):
+                chosen.append(x)
     return [x[2] for x in chosen]

@@ -555,6 +555,15 @@ class ExploreTab:
                 dpg.add_text("events")
             form["per_class_help"] = muted("Set the number of events beside each class (0 or "
                                            "unticked: none).", themes, wrap=wrap, show=False)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Min. gap")
+                form["gap"] = dpg.add_input_float(default_value=0.0, min_value=0.0, min_clamped=True,
+                                                  step=0, width=90, format="%.2f")
+                tooltip(form["gap"], "Events of one class at least this many seconds apart, counting "
+                                     "the events this video has already. 0: no gap.")
+                dpg.add_text("s between events of a class (0: none)")
+            muted("Neighbouring frames are nearly the same picture; a gap keeps a burst of them from "
+                  "passing for many samples.", themes, wrap=wrap)
             with dpg.group(show=False) as group:
                 form["random_rows"] = group
                 with dpg.group(horizontal=True):
@@ -601,22 +610,25 @@ class ExploreTab:
         if g(form["number"]) == PER_CLASS:
             per_class = {name: max(0, int(g(form["per_class"][name]))) for name in classes}
         limit = max(1, int(g(form["limit"]))) if per_class is None else None
+        gap = round(float(g(form["gap"])), 4)     # the input is a 32-bit float: 0.2 -> 0.2000000029
         self.popups.close(form["tag"])
         self.import_csv_events(form["source_id"], form["path"], make_events=make_events,
                                class_names=classes, frames=[form["frame_index"]] if only_frame else None,
                                limit=limit, per_class=per_class,
                                order="random" if at_random else "first",
-                               seed=int(g(form["seed"])) if at_random else None)
+                               seed=int(g(form["seed"])) if at_random else None,
+                               min_gap_s=gap if gap > 0 else None)
 
     def import_csv_events(self, source_id: str, csv_path: str, *, make_events: bool = True,
                           class_names=None, frames=None, limit: Optional[int] = None,
                           per_class: Optional[Dict[str, int]] = None, order: str = "first",
-                          seed: Optional[int] = None) -> List[str]:
+                          seed: Optional[int] = None, min_gap_s: Optional[float] = None) -> List[str]:
         """Attach the CSV to the source (its boxes are drawn) and add its detections as events.
 
         *per_class* ``{class_name: n}`` asks for *n* events of each class (of
         the ticked *class_names*) instead of *limit* in all; ``order="random"``
-        draws them at random with *seed* (see
+        draws them at random with *seed*; *min_gap_s* keeps the events of a
+        class that many seconds apart (see
         :func:`yoru_explain.api.add_events_from_detections_csv`).
         """
         from yoru_explain import api
@@ -640,13 +652,14 @@ class ExploreTab:
                     p, source_id, csv_path, model_id=self.state.model_id or "",
                     class_names=(class_names or None) if per_class is None else None,
                     frames=frames, limit=limit, per_class=per_class, order=order, seed=seed,
-                    note=dpg.get_value("exp_note").strip())
+                    note=dpg.get_value("exp_note").strip(), min_gap_s=min_gap_s)
                 if order == "random":
-                    logger.info("drew %d event(s) at random from %s for %s: seed %s, %s, frames %s",
+                    logger.info("drew %d event(s) at random from %s for %s: seed %s, %s, frames %s%s",
                                 len(added), Path(csv_path).name, source_id, seed,
                                 f"per class {per_class}" if per_class is not None else
                                 f"at most {limit} of {class_names or 'every class'}",
-                                frames if frames is not None else "all")
+                                frames if frames is not None else "all",
+                                f", at least {min_gap_s:g} s apart" if min_gap_s else "")
             p.save()
         except Exception as e:
             self.popups.error("Import from YORU CSV", e)
@@ -657,7 +670,7 @@ class ExploreTab:
                 # Selected, so 3 Analyze runs them next (the list's title counts them).
                 self.events.select(added)
                 self._events_selected()
-                self._report_short(added, per_class, order)
+                self._report_short(added, per_class, order, min_gap_s)
             else:
                 self.popups.message("Import from YORU CSV", "No detection of the ticked classes "
                                     "(on the chosen frames) is in the file" +
@@ -666,7 +679,7 @@ class ExploreTab:
         return added
 
     def _report_short(self, added: List[str], per_class: Optional[Dict[str, int]],
-                      order: str) -> None:
+                      order: str, min_gap_s: Optional[float] = None) -> None:
         """Say which classes got fewer events than asked for."""
         if not per_class:
             return
@@ -675,6 +688,8 @@ class ExploreTab:
                  if got.get(name, 0) < n]
         if short:
             more = " that are not events already" if order == "random" else ""
+            if min_gap_s:
+                more += f" and at least {min_gap_s:g} s from the others"
             self.popups.message("Import from YORU CSV",
                                 f"Added {len(added)} events. Fewer than asked for ({'; '.join(short)}): "
                                 f"the chosen frames hold no more boxes of those classes{more}.")

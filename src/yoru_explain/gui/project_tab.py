@@ -32,6 +32,10 @@ BACKENDS = {
     "onnx": "onnx - ONNX exports (YOLOv5 / YOLOv8 / YOLO11)",
 }
 DIALOG_W = 600
+UNIT_TIP = ("The experimental unit is what you treat as one independent sample -- an animal, a pair, a "
+            "cage. Videos of the same animal share it. Exports carry it with every event, so events are "
+            "compared by unit, not frame by frame. Without one, each video is its own unit (shown in "
+            "brackets).")
 
 
 def model_options(backend: str, conf: float = 0.25, iou: float = 0.45,
@@ -54,7 +58,7 @@ class ProjectTab:
         self.state = app.state
         self.popups = app.popups
         self.sources = SelectTable("proj_sources", ["id", "file", "status", "kind", "size", "fps",
-                                                    "frames", "flips", "seek check", "YORU CSV"],
+                                                    "frames", "flips", "seek check", "YORU CSV", "unit"],
                                    multi=True, on_activate=lambda key: self._show_source(key))
         self.models = SelectTable("proj_models", ["id", "file", "status", "adapter", "options",
                                                   "sha256"],
@@ -111,6 +115,13 @@ class ProjectTab:
                 c = dpg.add_checkbox(label=label, tag=tag)
                 tooltip(c, "Applied to the files you add next: flip their frames as YORU did "
                            "before detecting. YORU's CSV files do not record this.")
+            dpg.add_spacer(width=18)
+            b = dpg.add_button(label="Set unit...", tag="proj_unit", callback=lambda: self.set_unit())
+            tooltip(b, UNIT_TIP)
+            b = dpg.add_button(label="Units from table...", tag="proj_units_csv",
+                               callback=lambda: self.units_from_csv())
+            tooltip(b, "A CSV with the columns video (file name, full path or id) and unit_id; other "
+                       "columns are left for your own analysis.")
         dpg.add_spacer(height=8)
 
         widgets.heading("Model", themes)
@@ -320,6 +331,63 @@ class ProjectTab:
     def _show_source(self, source_id) -> None:
         self.app.explore_tab.show_source(source_id)
         self.app.show_tab("explore")
+
+    # -- experimental units --------------------------------------------------------
+
+    def set_unit(self, source_ids=None, unit: Optional[str] = None) -> None:
+        """Put the selected videos into one experimental unit (a dialog asks for its name)."""
+        p = self._need_project()
+        if p is None:
+            return
+        ids = list(source_ids or self.sources.selected)
+        if not ids:
+            self.popups.message("Set unit", "Select the videos of one animal (or pair, cage, ...) first "
+                                            "(Ctrl/Shift-click for several).")
+            return
+
+        def apply(value):
+            try:
+                for sid in ids:
+                    p.set_unit(sid, value)
+                p.save()
+            except Exception as e:
+                self.popups.error("Set unit", e)
+            self.state.projectChanged.emit()
+
+        if unit is not None:
+            apply(unit)
+            return
+        current = {p.unit_of(s) for s in ids}
+        default = next(iter(current))[0] if len(current) == 1 and next(iter(current))[1] else ""
+        self.popups.form("Set unit", [("unit", f"Experimental unit of {', '.join(ids)} (empty: each video "
+                                               f"is its own unit). {UNIT_TIP}", default)],
+                         lambda values: apply(str(values["unit"])), ok="Set")
+
+    def units_from_csv(self, path: Optional[str] = None) -> None:
+        p = self._need_project()
+        if p is None:
+            return
+        f = path or widgets.ask_open_file("Units of the videos (video, unit_id)", widgets.CSV_TYPES)
+        if not f:
+            return
+        try:
+            report = p.assign_units_from_csv(f)
+            p.save()
+        except Exception as e:
+            self.popups.error("Units from table", e)
+            return
+        self.state.projectChanged.emit()
+        lines = [f"Set the unit of {len(report['assigned'])} video(s)."]
+        if report["unmatched"]:
+            lines.append(f"Not in the project: {', '.join(report['unmatched'][:6])}"
+                         + (" ..." if len(report["unmatched"]) > 6 else ""))
+        if report["ambiguous"]:
+            lines.append(f"More than one video has this name (give the full path or the id): "
+                         f"{', '.join(report['ambiguous'][:6])}")
+        if report["ignored_columns"]:
+            lines.append(f"Columns kept for your own analysis, not read here: "
+                         f"{', '.join(report['ignored_columns'])}")
+        self.popups.message("Units from table", "\n".join(lines))
 
     def check_seeking(self):
         """Compare seeked frames with frames decoded in order (5 samples) for the selected video."""
@@ -540,11 +608,12 @@ class ProjectTab:
             seek = s.get("seek_check") or {}
             csvs = ", ".join(Path(c["path"]).name for c in s.get("detections_files", []))
             status = p.source_file_status(s["source_id"])
+            unit, assigned = p.unit_of(s["source_id"])
             rows.append([s["source_id"], short(s["path"]), status, s["kind"],
                          f"{s['width']}x{s['height']}", f"{s['fps']:.3f}" if s.get("fps") else "",
                          s.get("frame_count"),
                          ("v" if s["v_flip"] else "") + ("h" if s["h_flip"] else "") or "-",
-                         seek.get("status", ""), csvs])
+                         seek.get("status", ""), csvs, unit if assigned else f"({unit})"])
             ids.append(s["source_id"])
             colors.append(None if status == "ok" else th.TEXT_WARN)
         self.sources.set_rows(rows, ids, colors)

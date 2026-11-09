@@ -109,7 +109,10 @@ changes.
    and YORU's thresholds, and loads it. *Remove* takes a video or model out of
    the project (removing a video also removes the events picked on it; files
    and run results are never deleted). *Load selected model* (or a
-   double-click) switches models.
+   double-click) switches models. *Set unit...* puts the selected videos into
+   one experimental unit — an animal, a pair, a cage: whatever you treat as
+   one independent sample — and *Units from table...* reads them from a CSV
+   (`video`, `unit_id`); a video without one is its own unit.
 2. *2 Pick events* — move to a frame (slider, `<` `>`, or the arrow keys);
    the loaded model's detections are drawn on the frame, whose axes are frame
    pixels (wheel zooms, drag pans, double-click fits). Click a box, *Add
@@ -120,7 +123,10 @@ changes.
    random*, *in total* or *per class* (a number beside each class). At
    random, n boxes of a class come from n different frames where the video
    has them, boxes that are events already are not drawn again, and the
-   *Seed* makes a draw repeatable (it is written to the log). YORU's CSV does not record the
+   *Seed* makes a draw repeatable (it is written to the log). *Min. gap*
+   keeps the events of a class that many seconds apart (also from the
+   video's earlier events), so a burst of near-identical neighbouring frames
+   does not pass for many samples. YORU's CSV does not record the
    model or its settings, so each imported box is found again with the
    loaded model before it is analysed; the CSV's boxes are drawn in light
    blue (*Detach* stops that). YORU's real-time `*_detect.csv` is not read
@@ -131,14 +137,25 @@ changes.
    the mouse.
 3. *3 Analyze* — choose occlusion or Grad-CAM and the score on the left
    (only the settings the chosen baseline uses are shown; batch size and the
-   run options are under *Advanced*), then *Analyze N events (selected)* or
+   run options are under *Advanced*). Occlusion patches are in *pixels* or
+   *x target size*: a fraction of the target's `sqrt(w × h)`, so animals filmed
+   at another magnification are tiled alike (the pixels used are recorded
+   with each result). Then *Analyze N events (selected)* or
    *Analyze all*. *Both methods* runs Grad-CAM and then occlusion on the same
    events, as two runs, each with its own settings and the same score
    (Grad-CAM, seconds per event, goes first, so its maps exist even if the
    occlusion run is cancelled). Progress with the estimated time left,
    cancel and the log are on the right; nothing blocks the window.
 4. *4 Results* — per-event values of each run (descriptive only);
-   double-click a row to see its map on the frame.
+   double-click a row to see its map on the frame. *Export for analysis*
+   writes the run to `exports/<run_id>/` for your own analysis: an events
+   table with each event's unit, a patch table, a summary per unit and
+   class, every map on a grid around its box, map and frame crops, and a
+   gallery of every event on one colour scale per class (or per run) with
+   contact sheets. YORU-Explain does not turn animals to a common
+   orientation or name body parts — that depends on the species and the
+   question — but `api.align_maps` re-samples the maps to orientations you
+   measured yourself (see [docs/DATA_SCHEMA.md](docs/DATA_SCHEMA.md)).
 
 *Settings* — device, logs, settings files, versions, capabilities. The
 *Project* menu also holds *Check seeking of the selected video* and *Add
@@ -157,10 +174,18 @@ ev = api.add_event(project, adapter, mdl.model_id, src["source_id"], frame_index
 project.save()
 outcome = api.run_analysis(project, adapter, mdl.model_id, [ev], api.AnalysisRequest("occlusion"))
 print(outcome.status, outcome.identity_check)
+
+project.set_unit(src["source_id"], "fly-01")              # the animal this video shows
+project.save()
+export = api.export_run(project, outcome.run_dir)         # -> my_project/exports/<run_id>/
+# Your own orientations (event_id, cx, cy, angle_deg, length[, directed]) -> aligned maps.
+aligned = api.align_maps(export.export_dir, "my_orientations.csv", out_dir="aligned")
 ```
 
 Worked scripts: [examples/synthetic_occlusion.py](examples/synthetic_occlusion.py)
-(no weights needed) and [examples/yolov5_video_event.py](examples/yolov5_video_event.py).
+(no weights needed), [examples/export_and_align.py](examples/export_and_align.py)
+(two synthetic animals: units, export, gallery, aligned means; no weights) and
+[examples/yolov5_video_event.py](examples/yolov5_video_event.py).
 Settings are dataclasses with `to_dict`/`from_dict` (JSON); there is no command line.
 
 ## Output
@@ -168,14 +193,19 @@ Settings are dataclasses with `to_dict`/`from_dict` (JSON); there is no command 
 ```text
 my_project/
 ├── project.json, events.csv
-└── runs/<run_id>/
-    ├── config.json        the request (method, parameters, score definition, seed)
-    ├── manifest.json      provenance: versions, GPU, model sha256, input ids, identity check, counts
-    ├── results.csv        one row per event
-    ├── perturbations.csv  one row per occluded patch
-    ├── maps/*.npz         maps and per-patch arrays + metadata
-    ├── previews/*.png     original | heatmap | overlay (for viewing)
-    └── logs/run.log
+├── runs/<run_id>/
+│   ├── config.json        the request (method, parameters, score definition, seed)
+│   ├── manifest.json      provenance: versions, GPU, model sha256, input ids, identity check, counts
+│   ├── results.csv        one row per event
+│   ├── perturbations.csv  one row per occluded patch
+│   ├── maps/*.npz         maps and per-patch arrays + metadata
+│   ├── previews/*.png     original | heatmap | overlay (for viewing)
+│   └── logs/run.log
+└── exports/<run_id>/      Export for analysis: plain tables and arrays for your own analysis
+    ├── events.csv, patches.csv, summary.csv   per event (with its unit), per patch, per unit and class
+    ├── box_maps.npz, mean_maps.npz            maps on a grid around each box; unit and class means
+    ├── maps/*.npz, crops/*.png                each map and frame over the analysed region
+    └── gallery/                               every event on a shared colour scale, contact sheets
 ```
 
 Every table carries `schema_version`; columns are in [docs/DATA_SCHEMA.md](docs/DATA_SCHEMA.md).
@@ -193,7 +223,7 @@ Videos and weights are referenced by path and hash, never copied.
   torchvision, ONNX exports). It is **not** verified on the YORU paper's models
   or on models trained in YORU with the other backends (not available here).
   Every run repeats the check on its first frame.
-* 341 tests (synthetic known-answer tests, real-model integration for every
+* 417 tests (synthetic known-answer tests, real-model integration for every
   backend, the GUI in process), plus a real-window test with
   `YORU_EXPLAIN_GUI_WINDOW=1`; see [docs/VALIDATION.md](docs/VALIDATION.md) for
   what they establish. The integration tests' models are fetched or built by

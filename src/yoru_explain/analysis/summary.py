@@ -49,6 +49,11 @@ def occlusion_summary(result) -> Dict[str, Any]:
                                    if p.score.status == ScoreStatus.OK.value
                                    and p.score.candidate_kept is False),
     }
+    if result.patch_size is not None:
+        out.update(patch_height_px=int(result.patch_size[0]), patch_width_px=int(result.patch_size[1]),
+                   stride_y_px=int(result.stride[0]), stride_x_px=int(result.stride[1]))
+    if result.target_size is not None:
+        out["target_size_px"] = float(result.target_size)
     if counted:
         best = max(counted, key=lambda p: p.delta)
         out.update(

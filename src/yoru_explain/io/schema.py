@@ -16,12 +16,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 #: 0.2.0 (2026-10-17): rotated boxes (``obb_*`` / ``matched_cx..angle``), every YORU backend.
-#: A 0.1.0 project or run reads unchanged: the new columns are just empty.
-SCHEMA_VERSION = "0.2.0"
+#: 0.3.0 (2026-11-09): patches sized relative to the target (``patch_*_px``, ``stride_*_px``,
+#: ``target_size_px`` in results.csv), experimental units of sources, export folders.
+#: A 0.1.0 or 0.2.0 project or run reads unchanged: the new columns are just empty.
+SCHEMA_VERSION = "0.3.0"
 
 PROJECT_KIND = "yoru-explain-project"
 MANIFEST_KIND = "yoru-explain-run-manifest"
 CONFIG_KIND = "yoru-explain-run-config"
+EXPORT_KIND = "yoru-explain-export"
 
 EVENT_COLUMNS = (
     "schema_version", "event_id", "source_id", "frame_index", "timestamp_ms", "frame_sha1",
@@ -41,6 +44,7 @@ RESULT_COLUMNS = (
     "obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle",
     "stored_score", "reproduction", "reproduction_iou",
     "method", "method_kind", "score_type", "identity_mode", "baseline",
+    "patch_height_px", "patch_width_px", "stride_y_px", "stride_x_px", "target_size_px",
     "original_score", "reference_score", "perturbed_score", "delta_score", "max_delta_patch_id",
     "delta_min", "delta_mean", "in_box_mean_delta", "out_box_mean_delta",
     "noop_delta", "full_region_score", "full_region_status",
@@ -61,6 +65,54 @@ PERTURBATION_COLUMNS = (
     "matched_score", "matched_class", "n_overlapping", "error_code",
 )
 
+# -- export folders (io/export.py) ------------------------------------------------
+
+#: exports/<run_id>/events.csv: one row per event of the run, failures included.
+EXPORT_EVENT_COLUMNS = (
+    "schema_version", "run_id", "event_id", "unit_id", "unit_assigned", "source_id", "source_path",
+    "fps", "frame_index", "timestamp_ms", "frame_sha1", "track_id", "class_id", "class_name",
+    "target_class", "x1", "y1", "x2", "y2", "obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle",
+    "target_size_px", "method", "method_kind", "score_type", "identity_mode", "baseline",
+    "patch_height_px", "patch_width_px", "stride_y_px", "stride_x_px",
+    "reference_score", "delta_score", "delta_min", "delta_mean", "in_box_mean_delta",
+    "out_box_mean_delta", "in_box_positive_share", "cam_max", "cam_in_box_fraction",
+    "n_perturbations", "n_counted", "n_disappeared", "n_class_changed", "n_candidate_dropped",
+    "noop_delta", "status", "error_code", "message", "stack_index", "map_file",
+    "crop_x0", "crop_y0", "crop_x1", "crop_y1", "crop_file", "crop_status", "run_map_file",
+)
+
+#: exports/<run_id>/patches.csv: one row per occluded patch (and control) of the
+#: run's finished events, with its place in frame pixels and in box units.
+EXPORT_PATCH_COLUMNS = (
+    "schema_version", "event_id", "unit_id", "class_name", "patch_id", "kind",
+    "x0", "y0", "x1", "y1", "u0", "v0", "u1", "v1", "status", "counted",
+    "perturbed_score", "delta_score", "candidate_kept", "pixel_change",
+)
+
+#: The per-event values summarised by exports/<run_id>/summary.csv.
+EXPORT_SUMMARY_METRICS = (
+    "reference_score", "delta_score", "in_box_mean_delta", "out_box_mean_delta",
+    "in_box_positive_share", "cam_in_box_fraction",
+)
+
+#: exports/<run_id>/summary.csv: per unit and class, then per class over units.
+EXPORT_SUMMARY_COLUMNS = (
+    "schema_version", "level", "class_name", "unit_id", "n_units", "n_events", "n_ok", "n_failed",
+    *(f"{m}_{stat}" for m in EXPORT_SUMMARY_METRICS for stat in ("mean", "median")),
+)
+
+#: exports/<run_id>/gallery/gallery.csv: one row per event drawn (or not).
+GALLERY_COLUMNS = (
+    "schema_version", "event_id", "unit_id", "class_name", "frame_index", "status", "file",
+    "scale_group", "vmin", "vmax",
+)
+
+#: exports/<run_id>/aligned/aligned.csv (analysis/normalize.align_maps).
+ALIGNED_COLUMNS = (
+    "schema_version", "event_id", "unit_id", "class_name", "status", "stack_index",
+    "cx", "cy", "angle_deg", "length", "directed",
+)
+
 
 #: results.csv columns holding integers / floats; the rest are text.
 RESULT_INT_COLUMNS = frozenset({
@@ -68,13 +120,14 @@ RESULT_INT_COLUMNS = frozenset({
     "max_delta_patch_id", "n_perturbations", "n_counted", "n_ok", "n_matched", "n_ambiguous",
     "n_class_changed", "n_unmatched", "n_disappeared", "n_non_finite", "n_error",
     "n_candidate_dropped", "gradcam_stride", "gradient_support",
+    "patch_height_px", "patch_width_px", "stride_y_px", "stride_x_px",
 })
 RESULT_FLOAT_COLUMNS = frozenset({
     "timestamp_ms", "x1", "y1", "x2", "y2", "obb_cx", "obb_cy", "obb_w", "obb_h", "obb_angle",
     "stored_score", "reproduction_iou", "original_score",
     "reference_score", "perturbed_score", "delta_score", "delta_min", "delta_mean",
     "in_box_mean_delta", "out_box_mean_delta", "noop_delta", "full_region_score", "gradient_score",
-    "cam_max", "cam_in_box_fraction", "elapsed_s",
+    "cam_max", "cam_in_box_fraction", "elapsed_s", "target_size_px",
 })
 
 

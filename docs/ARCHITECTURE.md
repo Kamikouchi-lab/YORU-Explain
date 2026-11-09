@@ -6,11 +6,13 @@
 gui/ (DearPyGui)              displays, dispatches, never computes an explanation
   │  calls
 api.py ── core/pipeline.py    runs over a project's events, writes run folders
+  │   └── core/export.py      a run as plain tables, grids, crops and a gallery (exports/<run_id>/)
   │
   ├── methods/                occlusion (numpy), Grad-CAM (torch), baselines
-  ├── analysis/               scoring in both identity modes, re-detection matching, summaries
-  ├── io/                     frames, project, run folders, schema, YORU CSV import
-  ├── visualization/          colour tables, overlays, preview PNGs
+  ├── analysis/               scoring in both identity modes, re-detection matching, summaries,
+  │                           box / aligned grids and unit-then-class means (normalize.py)
+  ├── io/                     frames, project (with experimental units), run folders, schema, YORU CSV import
+  ├── visualization/          colour tables, overlays, preview PNGs, the export gallery
   └── adapters/               the only code that runs a model
         ├── base.py           the ModelAdapter contract, capabilities, the identity comparison
         ├── yolov5.py         YORU's YOLOv5, reproduced step by step
@@ -119,6 +121,28 @@ one run folder each (the GUI's *Both methods*: `BOTH_METHODS`, Grad-CAM then
 occlusion). Every request is checked before the first run starts; the next
 run starts only after the previous one completed and while nothing is
 cancelled.
+
+## An export (`core/export.export_run`)
+
+```text
+results.csv, maps/*.npz, perturbations.csv (read once)  +  project (units, videos)
+for each event, by source and frame:
+    events.csv row (failures too, with their codes); unit_id from Project.unit_of
+    finished: map cropped to the analysed region → maps/<event>.npz
+              map on the box grid (analysis/normalize: nearest pixel, NaN stays NaN)
+              frame decoded in order, hash == the run's? → crops/<event>.png + grid picture
+              patches → patches.csv rows in frame pixels and box units
+summary.csv (per unit and class; per class over unit means), box_maps.npz, mean_maps.npz
+gallery/ (visualization/gallery: drawn from the export's own crops, one colour scale per group)
+<run_id>.partial → swapped in for exports/<run_id>/ when complete
+```
+
+The tool's geometry stops at what the model reports (its box, its rotated
+box). Orientation, body parts and statistics across animals depend on the
+species and the question, so they are the experimenter's:
+`analysis/normalize.align_maps` re-samples an export's maps to orientations
+the experimenter supplies, and every table carries `unit_id` for an analysis
+by experimental unit.
 
 ## Occlusion and batches
 

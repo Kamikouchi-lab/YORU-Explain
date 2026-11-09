@@ -46,7 +46,7 @@ TABS = (("project", "1  Project"), ("explore", "2  Pick events"), ("analyze", "3
         ("statistics", "4  Results"), ("settings", "Settings"))
 TAB_LABELS = dict(TABS)
 #: Tasks the tabs report themselves; any other failure is shown by the window.
-TAB_TASKS = ("analysis", "load_model", "check_seeking")
+TAB_TASKS = ("analysis", "load_model", "check_seeking", "export")
 #: How long quitting waits for a cancelled task to reach its next check.
 QUIT_WAIT_S = 60.0
 
@@ -78,8 +78,9 @@ def next_step(state) -> Tuple[str, Optional[str]]:
                 "press Analyze.", "analyze")
     if not analysed:
         return "Select the events to analyse in 2 Pick events (Ctrl/Shift-click for several).", "explore"
-    return ("See the maps: double-click a row in 4 Results. To explain more, pick or select other "
-            "events in 2 Pick events.", "statistics")
+    return ("See the maps: double-click a row in 4 Results, or Export for analysis there (tables, maps "
+            "around each box, a gallery). To explain more, pick or select other events in 2 Pick "
+            "events.", "statistics")
 
 
 class ExplainApp:
