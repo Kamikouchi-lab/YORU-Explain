@@ -757,7 +757,7 @@ def test_the_gui_workflow_with_a_rotated_box_model(app, tmp_path):
     st = app.state
     st.set_project(Project.create(tmp_path / "proj"))
     app.project_tab.add_source([str(image)])
-    app.project_tab.add_model(str(weights))                       # type: auto
+    app.project_tab.register_model(str(weights))                  # type: auto
     assert st.project.models[0].adapter == "yoru-ultralytics"
     app.project_tab.models.select_row(0)
     app.project_tab.load_model()
