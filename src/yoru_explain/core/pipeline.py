@@ -55,6 +55,11 @@ from yoru_explain.visualization.overlay import triptych
 log = get_logger("pipeline")
 
 METHODS = ("occlusion", "gradcam")
+#: The order of a run with both methods (:func:`run_analyses`).  Grad-CAM
+#: takes seconds per event and goes first: its maps exist even when the long
+#: occlusion run is cancelled, and the time left estimated during the
+#: occlusion run is that of the whole task.
+BOTH_METHODS = ("gradcam", "occlusion")
 #: IoU an imported (or re-anchored) detection needs to count as found again.
 REPRODUCE_IOU = 0.9
 
@@ -124,9 +129,14 @@ class Progress:
     inner_done: int = 0
     inner_total: int = 0
     message: str = ""
+    #: Which of :func:`run_analyses`' runs this is (0-based), of how many, and its method.
+    run_index: int = 0
+    n_runs: int = 1
+    method: str = ""
 
     @property
     def fraction(self) -> float:
+        """Done of the current run (not of all runs of :func:`run_analyses`)."""
         if not self.n_events:
             return 1.0
         inner = self.inner_done / self.inner_total if self.inner_total else 0.0
@@ -301,11 +311,14 @@ class ResultCache:
 def _preview_lines(request, target, result, score_text, method_label) -> List[str]:
     if request.method == "occlusion":
         c = request.occlusion
+        (ph, pw), (sy, sx) = result.patch_size, result.stride
+        relative = (f" ({c.patch_fraction:g} x target size {result.target_size:.0f} px)"
+                    if c.relative else "")
         return [
             f"{target.event_id}  frame {target.frame.frame_index}  {target.detection.class_name}  "
             f"score {result.reference_score:.4f} (reference {result.reference_score_batch:.4f})",
             f"explained: {score_text}",
-            f"occlusion {c.patch_size[0]}x{c.patch_size[1]} stride {c.stride[0]}x{c.stride[1]}, "
+            f"occlusion {ph}x{pw} stride {sy}x{sx}{relative}, "
             f"baseline {c.baseline.describe()}, region {c.region}, batch {c.batch_size}",
             method_label,
         ]
@@ -511,6 +524,44 @@ def run_analysis(project: Project, adapter, model_id: str, event_ids: Sequence[s
     return RunOutcome(run_id, writer.dir, status, dict(counts), identity, outcome_rows)
 
 
+def run_analyses(project: Project, adapter, model_id: str, event_ids: Sequence[str],
+                 requests: Sequence[AnalysisRequest], *, progress: Optional[ProgressFn] = None,
+                 cancel: Optional[CancelFn] = None) -> List[RunOutcome]:
+    """Run *requests* one after another on the same events: one run (folder) each.
+
+    Every request is checked first, so one the adapter cannot honour stops
+    them all before anything is written.  The next run starts only after the
+    previous one ``completed`` and while nothing is cancelled: a cancelled or
+    failed run (a failed identity check) ends the sequence, and the outcomes
+    returned are those of the runs that started.  :class:`Progress` says which
+    run it is about (``run_index``, ``n_runs``, ``method``); its ``fraction``
+    is that of the current run.
+    """
+    requests = list(requests)
+    if not requests:
+        raise ValueError("no analysis requested")
+    for request in requests:
+        check_request(adapter, request)
+    event_ids = list(event_ids)
+    outcomes: List[RunOutcome] = []
+    for i, request in enumerate(requests):
+        if outcomes:
+            last = outcomes[-1]
+            stop = (f"the {requests[i - 1].method} run {last.run_id} was {last.status}"
+                    if last.status != "completed" else
+                    "cancelled" if cancel is not None and cancel() else None)
+            if stop:
+                log.info("not started: %s (%s)", ", ".join(r.method for r in requests[i:]), stop)
+                break
+
+        def report(pr: Progress, i=i, method=request.method) -> None:
+            progress(replace(pr, run_index=i, n_runs=len(requests), method=method))
+
+        outcomes.append(run_analysis(project, adapter, model_id, event_ids, request,
+                                     progress=report if progress else None, cancel=cancel))
+    return outcomes
+
+
 class _IdentityFailure(Exception):
     def __init__(self, result: Dict[str, Any]):
         super().__init__(f"adapter differs from YORU's detector: {result}")
@@ -526,7 +577,7 @@ def _analyze_event(project, adapter, writer, request, target, source, readers, c
             readers[sid] = project.open_source(sid)
             inputs[sid] = {k: source.get(k) for k in (
                 "source_id", "path", "kind", "size", "quick_id", "quick_id_method", "width", "height",
-                "fps", "frame_count", "fourcc", "v_flip", "h_flip", "seek_check")}
+                "fps", "frame_count", "fourcc", "v_flip", "h_flip", "seek_check", "unit_id")}
             inputs[sid]["verify"] = project.verify_source(sid)
         frame = readers[sid].read(target.frame.frame_index, exact=True)
         if target.frame.frame_sha1 and frame.sha1 != target.frame.frame_sha1:

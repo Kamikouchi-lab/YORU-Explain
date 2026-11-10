@@ -18,7 +18,11 @@ confidence YORU itself reports for the detection.
   hiding R raises it.  Signs are kept; nothing is clipped at 0.
 * Rectangles tile a region of interest with a fixed patch size and stride
   (frame pixels).  The last row/column of patches is aligned to the region's
-  far edge, so every pixel of the region is covered.
+  far edge, so every pixel of the region is covered.  With
+  ``patch_fraction`` the patch side is that fraction of the target's size
+  ``sqrt(w * h)`` (of its rotated box for OBB models), rounded to whole
+  pixels per event, so animals filmed at another magnification are tiled
+  alike; the pixels used are recorded with every result.
 * The map at pixel p is the mean delta of the counted patches covering p:
   ``M(p) = mean{delta(R) : p in R, R counted}``.  A patch is *counted* when
   the target was scored on it (``ok`` in fixed-candidate mode, ``matched``
@@ -60,6 +64,10 @@ log = get_logger("occlusion")
 OCCLUSION_VERSION = "0.1.0"
 METHOD_KIND = "perturbation_effect"
 REGIONS = ("context", "box", "full")
+#: The smallest patch side (pixels) a ``patch_fraction`` may give; a target
+#: too small for it fails with ``invalid_config`` rather than being tiled
+#: with patches of a pixel or two.
+MIN_PATCH_PX = 2
 
 
 def _pair(v) -> Tuple[int, int]:
@@ -67,6 +75,15 @@ def _pair(v) -> Tuple[int, int]:
         return (int(v), int(v))
     a, b = v
     return (int(a), int(b))
+
+
+def target_size_px(box: Sequence[float], obb: Optional[Sequence[float]] = None) -> float:
+    """``sqrt(w * h)`` of the target: of its rotated box when it has one, else of its box."""
+    if obb is not None:
+        w, h = float(obb[2]), float(obb[3])
+    else:
+        w, h = float(box[2]) - float(box[0]), float(box[3]) - float(box[1])
+    return math.sqrt(max(w, 0.0) * max(h, 0.0))
 
 
 @dataclass(frozen=True)
@@ -89,6 +106,12 @@ class OcclusionConfig:
     #: Re-detection: let ``ambiguous`` matches into the map.
     include_ambiguous: bool = False
     method_version: str = OCCLUSION_VERSION
+    #: Square patches whose side is this fraction of the target's size
+    #: (:func:`target_size_px`), rounded per event; *patch_size* and *stride*
+    #: are then not used.  ``None``: patches of *patch_size* pixels.
+    patch_fraction: Optional[float] = None
+    #: The step as a fraction of the target's size; ``None``: half the patch.
+    stride_fraction: Optional[float] = None
 
     def __post_init__(self):
         object.__setattr__(self, "patch_size", _pair(self.patch_size))
@@ -101,9 +124,57 @@ class OcclusionConfig:
             raise ValueError("context_scale must be >= 1")
         if int(self.batch_size) < 1:
             raise ValueError("batch_size must be >= 1")
+        if self.patch_fraction is not None:
+            object.__setattr__(self, "patch_fraction", float(self.patch_fraction))
+            if not 0.0 < self.patch_fraction <= 4.0:
+                raise ValueError("patch_fraction must be in (0, 4]")
+        if self.stride_fraction is not None:
+            if self.patch_fraction is None:
+                raise ValueError("stride_fraction needs patch_fraction (strides in pixels go with "
+                                 "patches in pixels)")
+            object.__setattr__(self, "stride_fraction", float(self.stride_fraction))
+            if not 0.0 < self.stride_fraction <= 4.0:
+                raise ValueError("stride_fraction must be in (0, 4]")
+
+    @property
+    def relative(self) -> bool:
+        """Whether the patches are sized relative to the target (``patch_fraction``)."""
+        return self.patch_fraction is not None
+
+    def patch_geometry(self, box: Sequence[float], obb: Optional[Sequence[float]] = None
+                       ) -> Tuple[Tuple[int, int], Tuple[int, int], float]:
+        """``(patch_size, stride, target size)`` in frame pixels for a target with *box* / *obb*.
+
+        Fixed sizes come back as configured.  A ``patch_fraction`` gives a
+        square patch of ``round(fraction * size)`` pixels and a stride of
+        ``round(stride_fraction * size)`` (half the patch's fraction when
+        not given), at least 1 pixel; a patch below :data:`MIN_PATCH_PX`
+        raises ``invalid_config``.
+        """
+        size = target_size_px(box, obb)
+        if self.patch_fraction is None:
+            return self.patch_size, self.stride, size
+        p = int(round(self.patch_fraction * size))
+        if p < MIN_PATCH_PX:
+            raise ExplainError(
+                ErrorCode.INVALID_CONFIG,
+                f"a patch of {self.patch_fraction:g} x the target size ({size:.1f} px) is {p} px; "
+                f"below {MIN_PATCH_PX} px the map would be noise -- use a larger fraction or pixels")
+        frac = self.stride_fraction if self.stride_fraction is not None else self.patch_fraction / 2.0
+        s = max(1, int(round(frac * size)))
+        return (p, p), (s, s), size
+
+    def describe_patches(self) -> str:
+        """The patch setting in words, for logs and previews."""
+        if self.patch_fraction is None:
+            return (f"{self.patch_size[0]}x{self.patch_size[1]} px, stride "
+                    f"{self.stride[0]}x{self.stride[1]} px")
+        stride = (f"{self.stride_fraction:g}" if self.stride_fraction is not None
+                  else f"{self.patch_fraction / 2:g}")
+        return f"{self.patch_fraction:g} x target size, stride {stride} x target size"
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "method": "occlusion",
             "method_kind": METHOD_KIND,
             "method_version": self.method_version,
@@ -117,6 +188,12 @@ class OcclusionConfig:
             "seed": int(self.seed),
             "include_ambiguous": bool(self.include_ambiguous),
         }
+        # Only when used: a pixel-sized configuration keeps the dict (and so the
+        # cache keys) it had before the fractions existed.
+        if self.patch_fraction is not None:
+            d["patch_fraction"] = self.patch_fraction
+            d["stride_fraction"] = self.stride_fraction
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "OcclusionConfig":
@@ -124,7 +201,8 @@ class OcclusionConfig:
         d.pop("method", None)
         d.pop("method_kind", None)
         known = {"method_version", "patch_size", "stride", "baseline", "region", "context_scale",
-                 "score", "batch_size", "seed", "include_ambiguous"}
+                 "score", "batch_size", "seed", "include_ambiguous", "patch_fraction",
+                 "stride_fraction"}
         unknown = set(d) - known
         if unknown:
             raise ValueError(f"unknown occlusion keys: {sorted(unknown)}")
@@ -174,6 +252,11 @@ class OcclusionResult:
     #: The same at the run's batch size: the deltas' reference.
     reference_score_batch: Optional[float] = None
     roi: Optional[Tuple[int, int, int, int]] = None
+    #: ``(height, width)`` and ``(y, x)`` step of the patches used, frame pixels.
+    patch_size: Optional[Tuple[int, int]] = None
+    stride: Optional[Tuple[int, int]] = None
+    #: ``sqrt(w * h)`` of the target (see :func:`target_size_px`).
+    target_size: Optional[float] = None
     patches: List[PatchResult] = field(default_factory=list)
     controls: Dict[str, PatchResult] = field(default_factory=dict)
     delta_map: Optional[np.ndarray] = None
@@ -306,6 +389,12 @@ def run_occlusion(adapter, frame: np.ndarray, target: ExplanationTarget, config:
         result.status, result.error_code = "failed", ErrorCode.MODEL_UNSUPPORTED.value
         result.message = f"{adapter.name} cannot read {config.score.score_type}"
         return result
+    try:
+        patch_size, stride, result.target_size = config.patch_geometry(target.box, target.obb)
+    except ExplainError as e:   # a target too small for the patch fraction: nothing is run
+        result.status, result.error_code, result.message = "failed", e.code.value, e.message
+        return result
+    result.patch_size, result.stride = patch_size, stride
 
     try:
         adapter.assert_inference_mode()
@@ -324,7 +413,7 @@ def run_occlusion(adapter, frame: np.ndarray, target: ExplanationTarget, config:
 
         roi = region_of_interest(target.box, config.region, config.context_scale, w, h)
         result.roi = roi
-        patches = make_patches(roi, config.patch_size, config.stride, w, h)
+        patches = make_patches(roi, patch_size, stride, w, h)
         jobs = [Patch(-1, "noop", (0, 0, 0, 0)),
                 Patch(len(patches), "full_region", roi)] + patches
         baseline = Baseline(config.baseline, frame, config.seed)

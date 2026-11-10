@@ -78,6 +78,7 @@ def test_the_whole_gui_workflow(app, tmp_path):
     assert app.project_tab.sources.row_count == 1 and app.project_tab.models.row_count == 1
     app.tick()                                  # the status line follows once per frame
     assert str(project.root) in app.status_text
+    assert "Load the model" in app.guide_text
 
     # Load the model on the task thread.
     app.project_tab.models.select_row(0)
@@ -86,6 +87,13 @@ def test_the_whole_gui_workflow(app, tmp_path):
     assert st.model_id == model.model_id
     assert app.analyze_tab.gradcam_offered          # the synthetic model's probe passed
     assert model.model_id in app.status_text
+    assert app.project_tab.models.cell(0, 2) == "loaded"
+    # The next step is on another tab: the guide offers to go there.
+    assert "Pick the detections" in app.guide_text
+    assert dpg.get_item_configuration("guide_go")["show"]
+    app._guide_go()
+    assert app.current_tab() == "explore" and not dpg.get_item_configuration("guide_go")["show"]
+    assert not dpg.get_item_configuration("ana_run_all")["enabled"]       # no events yet
 
     # Explore: a frame arrives with its detections; click the red box.
     ex = app.explore_tab
@@ -100,8 +108,12 @@ def test_the_whole_gui_workflow(app, tmp_path):
     assert ex.selected == red and ex.det_table.selected == [red]
     ex.add_events(all_on_frame=False)
     assert len(st.project.events) == 1
+    assert st.selected_events == ["ev-0001"]           # a new event joins the selection
     ex.events.click(0)
     assert st.selected_events == ["ev-0001"]
+    assert "Analyse the 1 selected" in app.guide_text
+    assert dpg.get_item_configuration("ana_run_sel")["label"] == "Analyze 1 event (selected)"
+    assert dpg.get_item_configuration("ana_run_sel")["enabled"]
 
     # Analyze, and time every tick meanwhile.
     an = app.analyze_tab
@@ -123,10 +135,11 @@ def test_the_whole_gui_workflow(app, tmp_path):
         time.sleep(0.005)
     assert not st.tasks.busy
     assert an.last_run is not None and an.last_run.status == "completed", dpg.get_value("ana_status")
-    assert an.results.row_count == 1 and an.results.cell(0, 2) == "ok"
+    assert an.results.row_count == 1 and an.results.cell(0, 3) == "ok"
     assert len(ticks) > 5           # the loop kept running
     assert max(ticks) < 0.5         # and never waited on the analysis
     assert "ev-0001" in an.log.text()
+    assert "See the maps" in app.guide_text
 
     # View the result: heatmap, overlay, side by side, with the colour scale.
     run_dir = str(an.last_run.run_dir)
@@ -152,7 +165,7 @@ def test_the_whole_gui_workflow(app, tmp_path):
     assert dpg.is_item_shown("ana_cam") and not dpg.is_item_shown("ana_occ")
     an.run(selected_only=True)
     assert tick_until(app, lambda: not st.tasks.busy, timeout=60)
-    assert an.last_run.status == "completed" and an.results.cell(0, 2) == "ok"
+    assert an.last_run.status == "completed" and an.results.cell(0, 3) == "ok"
 
     # Statistics lists both runs; Settings knows the model.
     app.statistics_tab.refresh()
@@ -189,6 +202,68 @@ def test_cancel_from_the_gui(app, tmp_path):
     assert tick_until(app, lambda: not st.tasks.busy, timeout=120)
     assert an.last_run.status == "cancelled"
     assert any(r.get("status") == "cancelled" for r in an.last_run.results)
+
+
+def test_both_methods_with_the_time_left_on_the_progress_bar(app, tmp_path):
+    from yoru_explain import api
+    from yoru_explain.io.project import Project
+    from yoru_explain.io.runs import RunReader
+
+    video = _video(tmp_path / "clip.avi", n=10)
+    project = Project.create(tmp_path / "proj")
+    sid = project.add_source(video)["source_id"]
+    mid = project.add_model(None, "toy-grid").model_id
+    adapter = api.load_adapter("toy-grid", device="cpu")
+    for frame in (2, 6):
+        api.add_event(project, adapter, mid, sid, frame, 0)
+    project.save()
+
+    st = app.state
+    st.set_project(Project.open(project.root))
+    st.set_adapter(adapter, mid)
+    an = app.analyze_tab
+    assert dpg.get_item_configuration("ana_both_all")["enabled"]
+    assert dpg.get_item_configuration("ana_both_all")["label"] == "Both methods: all 2 events"
+    assert "Both methods: Grad-CAM, then occlusion" in dpg.get_value("ana_run_help")
+
+    # Occlusion's identity mode is kept while the field shows Grad-CAM's.
+    dpg.set_value("ana_identity", "redetect")
+    an.set_method("gradcam")
+    assert dpg.get_value("ana_identity") == "fixed_candidate"
+    assert an.request().occlusion.score.identity_mode == "redetect"
+    an.set_method("occlusion")
+    assert dpg.get_value("ana_identity") == "redetect"
+    dpg.set_value("ana_identity", "fixed_candidate")
+    dpg.set_value("ana_patch", 8)
+    dpg.set_value("ana_stride", 4)
+    dpg.set_value("ana_cache", False)
+    an.set_method("gradcam")                    # the method shown does not matter
+
+    an.run(selected_only=False, both=True)
+    assert st.tasks.busy and not dpg.get_item_configuration("ana_both_sel")["enabled"]
+    overlays = []
+    end = time.monotonic() + 120
+    while st.tasks.busy and time.monotonic() < end:
+        app.tick()
+        overlays.append(dpg.get_item_configuration("ana_progress")["overlay"])
+        time.sleep(0.005)
+    assert not st.tasks.busy, dpg.get_value("ana_status")
+
+    runs = an.last_runs
+    assert [r.status for r in runs] == ["completed", "completed"], dpg.get_value("ana_status")
+    assert [RunReader(r.run_dir).config["method"] for r in runs] == ["gradcam", "occlusion"]
+    assert RunReader(runs[1].run_dir).config["method_config"]["score"]["identity_mode"] == "fixed_candidate"
+    assert an.last_run is runs[-1]
+    assert an.results.row_count == 4
+    methods = sorted(an.results.cell(i, 1) for i in range(4))
+    assert methods == ["Grad-CAM", "Grad-CAM", "occlusion", "occlusion"]
+    assert all(an.results.cell(i, 3) == "ok" for i in range(4))
+    # The bar named the run and what follows, then gave the time left.
+    assert overlays[0].startswith("1/2 Grad-CAM") and overlays[0].endswith("|  next: occlusion")
+    occlusion = [o for o in overlays if o.startswith("2/2 occlusion")]
+    assert any(" left" in o for o in occlusion), occlusion
+    assert dpg.get_item_configuration("ana_progress")["overlay"].startswith("100%  |  done in ")
+    assert not errors(app), errors(app)
 
 
 def test_settings_survive_export_and_import(app, tmp_path):
@@ -383,18 +458,209 @@ def test_models_are_added_with_the_adapter_for_their_backend(app, tmp_path):
         zf.writestr("archive/data.pkl", b"\x80\x02cmodels.yolo\nDetectionModel\n")
     tab = app.project_tab
     for f in (files["flies_rtdetr.pt"], files["flies.onnx"], v1):
-        tab.add_model(str(f))                           # type: auto
-    dpg.set_value("proj_backend", BACKENDS["ultralytics"])
-    tab.add_model(str(files["best.pt"]))
-    dpg.set_value("proj_blackbox", True)
-    dpg.set_value("proj_backend", BACKENDS["auto"])
-    tab.add_model(str(files["other.onnx"]))
+        tab.register_model(str(f))                      # type: auto
+    # Through the "Add model" dialog: the file first, then its type and thresholds.
+    tag = tab.add_model(str(files["best.pt"]))
+    assert app.popups.showing == [tag]
+    form = tab.model_form
+    dpg.set_value(form["backend"], BACKENDS["ultralytics"])
+    dpg.set_value(form["conf"], 0.4)
+    dpg.set_value(form["load"], False)
+    tab._accept_model_form()
+    assert not app.popups.showing and app.state.tasks.current is None   # not loaded
+    tab.register_model(str(files["other.onnx"]), black_box=True)
     models = app.state.project.models
     assert [m.adapter for m in models] == ["yoru-rtdetr", "yoru-onnx", "yoru-yolov5", "yoru-ultralytics",
                                            "yoru-detector"]
     assert "rgb_input" in models[2].options and "rgb_input" not in models[0].options
+    assert models[3].options["conf_thresh"] == 0.4
     assert models[4].options["backend"] == "onnx"
-    assert tab.models.row_count == 5 and not errors(app)
+    assert tab.models.row_count == 5 and tab.models.selected == [models[4].model_id]
+    assert not errors(app)
+
+
+def _settle(app, n=4):
+    for _ in range(n):            # a closed popup leaves the screen before the next opens
+        app.tick()
+
+
+def test_a_new_project_is_named_and_placed_in_a_dialog(app, tmp_path):
+    tab = app.project_tab
+    assert "Create a new project" in app.guide_text
+    tag = tab.new_project()
+    form = tab.project_form
+    assert app.popups.showing == [tag]
+    dpg.set_value(form["location"], str(tmp_path))
+    tab._project_form_changed()
+    assert "Enter a name" in dpg.get_value(form["preview"])
+    dpg.set_value(form["name"], "bad:name")
+    tab._accept_project_form()                          # refused: the dialog stays, says why
+    assert app.popups.showing == [tag] and app.state.project is None
+    assert "cannot contain" in dpg.get_value(form["preview"])
+    dpg.set_value(form["name"], "courtship")
+    tab._project_form_changed()
+    assert str(tmp_path / "courtship") in dpg.get_value(form["preview"])
+    tab._accept_project_form()
+    p = app.state.project
+    assert p.root == tmp_path / "courtship" and p.name == "courtship"
+    assert (tmp_path / "courtship" / "project.json").is_file()
+    assert "Add the videos" in app.guide_text
+    _settle(app)
+    assert not app.popups.showing
+    # The dialog starts where the last project went; the same name is refused.
+    tab.new_project()
+    assert dpg.get_value(tab.project_form["location"]) == str(tmp_path)
+    dpg.set_value(tab.project_form["name"], "courtship")
+    tab._accept_project_form()
+    assert "already a project" in dpg.get_value(tab.project_form["preview"])
+    assert not errors(app)
+
+
+def test_load_project_explains_a_folder_that_is_not_one(app, tmp_path):
+    from yoru_explain.io.project import Project
+
+    tab = app.project_tab
+    tab.load_project(str(tmp_path))
+    assert app.popups.shown[-1][0] == "warning" and "no project.json" in app.popups.shown[-1][2]
+    assert app.state.project is None
+    Project.create(tmp_path / "proj", "mine")
+    tab.load_project(str(tmp_path / "proj"))
+    assert app.state.project.name == "mine"
+    assert not errors(app)
+
+
+def test_videos_and_models_can_be_removed(app, tmp_path):
+    from yoru_explain import api
+    from yoru_explain.io.project import Project
+
+    video, other = _video(tmp_path / "clip.avi", n=10), _video(tmp_path / "other.avi", n=10)
+    project = Project.create(tmp_path / "proj")
+    s1 = project.add_source(video)["source_id"]
+    s2 = project.add_source(other)["source_id"]
+    mid = project.add_model(None, "toy-grid").model_id
+    adapter = api.load_adapter("toy-grid", device="cpu")
+    api.add_event(project, adapter, mid, s1, 0, 0)
+    api.add_event(project, adapter, mid, s2, 0, 0)
+    project.save()
+    st = app.state
+    st.set_project(Project.open(project.root))
+    st.set_adapter(adapter, mid)
+    tab = app.project_tab
+
+    tab.sources.select([s1])
+    tab.remove_sources()                                 # asks first, and says what goes with it
+    kind, _, text = app.popups.shown[-1]
+    assert kind == "question" and "clip.avi" in text and "1 event(s)" in text
+    tab.remove_sources([s1], confirm=False)
+    assert [s["source_id"] for s in st.project.sources] == [s2]
+    assert [e["source_id"] for e in st.project.events] == [s2]
+    assert tab.sources.row_count == 1 and app.explore_tab._source_ids == [s2]
+    assert app.explore_tab.events.row_count == 1
+    tab.add_source([str(video)])
+    assert st.project.sources[-1]["source_id"] == "src-003"   # src-001 is never given again
+    assert tab.sources.selected == ["src-003"]
+
+    tab.models.select([mid])
+    tab.remove_models()
+    assert "loaded model" in app.popups.shown[-1][2]
+    tab.remove_models([mid], confirm=False)
+    assert st.adapter is None and st.model_id is None and not st.project.models
+    assert len(st.project.events) == 1                         # events stay
+    assert "Add the model" in app.guide_text
+    tab.add_toy()
+    assert st.project.models[0].model_id == "mdl-002"
+    assert "Load the model" in app.guide_text
+    assert not errors(app)
+
+
+def test_events_are_imported_from_a_yoru_csv_in_a_dialog(app, tmp_path):
+    import csv
+
+    from yoru_explain import api
+    from yoru_explain.io.project import Project
+
+    video = _video(tmp_path / "clip.avi", n=10)
+    project = Project.create(tmp_path / "proj")
+    sid = project.add_source(video)["source_id"]
+    mid = project.add_model(None, "toy-grid").model_id
+    project.save()
+    adapter = api.load_adapter("toy-grid", device="cpu")
+    path = tmp_path / "clip.csv"                     # YORU's video-analysis layout, beside the video
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "x1", "y1", "x2", "y2", "x_center", "y_center", "w", "h", "angle",
+                    "confidence", "class", "class_name"])
+        with project.open_source(sid) as r:
+            for i in range(6):
+                for d in adapter.detect(r.read(i).image):
+                    x1, y1, x2, y2 = d.box
+                    w.writerow([i, x1, y1, x2, y2, (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1, 0,
+                                d.score, d.class_id, d.class_name])
+    st = app.state
+    st.set_project(Project.open(project.root))
+    st.set_adapter(adapter, mid)
+    ex = app.explore_tab
+    ex.set_index(2)
+    assert tick_until(app, lambda: ex.frame is not None and ex.frame.frame_index == 2)
+    assert ex._suggested_csv(st.project.source(sid)) == str(path)
+
+    tag = ex.import_csv(str(path))
+    assert app.popups.showing == [tag]
+    form = ex.csv_form
+    assert set(form["classes"]) == {"red", "green"}
+    dpg.set_value(form["classes"]["green"], False)
+    dpg.set_value(form["limit"], 4)
+    ex._accept_csv_form(True)
+    events = st.project.events
+    assert len(events) == 4
+    assert all(e["class_name"] == "red" and e["origin"] == "csv_import" for e in events)
+    assert st.selected_events == [e["event_id"] for e in events]
+    assert st.project.source(sid)["detections_files"][0]["path"] == str(path.resolve())
+    assert dpg.is_item_shown("exp_csv_row") and "clip.csv" in dpg.get_value("exp_csv_info")
+    assert "clip.csv" in app.project_tab.sources.cell(0, 9)
+
+    # Only the frame shown now: its boxes, of both classes.
+    ex.set_index(2)
+    assert tick_until(app, lambda: ex.frame is not None and ex.frame.frame_index == 2)
+    _settle(app, 6)
+    ex.import_csv(str(path))
+    form = ex.csv_form
+    dpg.set_value(form["frames"], dpg.get_item_configuration(form["frames"])["items"][1])
+    ex._accept_csv_form(True)
+    added = st.project.events[4:]
+    assert len(added) == 2 and {e["frame_index"] for e in added} == {"2"}
+    assert len(st.project.source(sid)["detections_files"]) == 1     # attached once
+
+    # At random, a number per class. The CSV has a red and a green box on frames 0-5; red is
+    # an event on frames 0-3 and green on frame 2 already, and those are not drawn again.
+    from yoru_explain.gui.explore_tab import PER_CLASS, RANDOM
+
+    _settle(app, 6)
+    ex.import_csv(str(path))
+    form = ex.csv_form
+    assert not dpg.is_item_shown(form["per_class"]["red"]) and not dpg.is_item_shown(form["random_rows"])
+    dpg.set_value(form["order"], RANDOM)
+    dpg.set_value(form["number"], PER_CLASS)
+    ex._csv_form_changed()
+    assert dpg.is_item_shown(form["per_class"]["red"]) and dpg.is_item_shown(form["random_rows"])
+    assert not dpg.is_item_shown(form["limit_row"])
+    dpg.set_value(form["per_class"]["red"], 5)
+    dpg.set_value(form["per_class"]["green"], 2)
+    dpg.set_value(form["seed"], 4)
+    ex._accept_csv_form(True)
+    drawn = st.project.events[6:]
+    assert sorted(e["class_name"] for e in drawn) == ["green", "green", "red", "red"]
+    assert {e["frame_index"] for e in drawn if e["class_name"] == "red"} == {"4", "5"}
+    green = [e["frame_index"] for e in drawn if e["class_name"] == "green"]
+    assert len(set(green)) == 2 and "2" not in green
+    assert st.selected_events == [e["event_id"] for e in drawn]
+    assert "red: 2 of 5" in app.popups.shown[-1][2]                  # only two red boxes left
+
+    ex.detach_csv()
+    assert not st.project.source(sid)["detections_files"]
+    assert not dpg.is_item_shown("exp_csv_row")
+    assert len(st.project.events) == 10                             # the events stay
+    assert not errors(app)
 
 
 class _RedetectOnly:
@@ -491,7 +757,7 @@ def test_the_gui_workflow_with_a_rotated_box_model(app, tmp_path):
     st = app.state
     st.set_project(Project.create(tmp_path / "proj"))
     app.project_tab.add_source([str(image)])
-    app.project_tab.add_model(str(weights))                       # type: auto
+    app.project_tab.register_model(str(weights))                  # type: auto
     assert st.project.models[0].adapter == "yoru-ultralytics"
     app.project_tab.models.select_row(0)
     app.project_tab.load_model()

@@ -31,7 +31,7 @@ class TaskRunner:
     """One background task at a time."""
 
     def __init__(self, on_slot_error=None):
-        #: ``(fraction, message)``, the latest the task reported.
+        #: ``(fraction, message, detail)``, the latest the task reported.
         self.progress = Signal(on_slot_error)
         #: ``(name, result)``
         self.finished = Signal(on_slot_error)
@@ -80,10 +80,14 @@ class TaskRunner:
     def cancelled(self) -> bool:
         return self._cancel.is_set()
 
-    def report(self, fraction: float, message: str = "") -> None:
-        """Called from the task's thread; delivered by the next :meth:`poll`."""
+    def report(self, fraction: float, message: str = "", detail: Any = None) -> None:
+        """Called from the task's thread; delivered by the next :meth:`poll`.
+
+        *detail* is anything the task's tab wants with it (an analysis passes
+        its :class:`~yoru_explain.core.pipeline.Progress`).
+        """
         with self._lock:
-            self._progress = (float(fraction), message)
+            self._progress = (float(fraction), message, detail)
 
     def poll(self) -> None:
         """Deliver progress and the outcome; on the render thread, once per frame."""

@@ -160,6 +160,13 @@ class RunReader:
         rows = schema.read_rows(path) if path.is_file() else []
         return [r for r in rows if event_id is None or r["event_id"] == event_id]
 
+    def perturbations_by_event(self) -> Dict[str, List[Dict[str, str]]]:
+        """perturbations.csv grouped by event, in one pass over the file."""
+        out: Dict[str, List[Dict[str, str]]] = {}
+        for r in self.perturbations():
+            out.setdefault(r["event_id"], []).append(r)
+        return out
+
     def result(self, event_id: str) -> Optional[Dict[str, str]]:
         for r in self.results:
             if r["event_id"] == event_id:
@@ -257,6 +264,8 @@ def occlusion_npz(result, extra_meta: Mapping[str, Any]):
                                np.float64),
         "roi": np.array(result.roi, np.int32),
         "frame_shape": np.array(result.delta_map.shape, np.int32),
+        "patch_size_px": np.array(result.patch_size, np.int32),
+        "stride_px": np.array(result.stride, np.int32),
     }
     meta = {
         "schema_version": schema.SCHEMA_VERSION,
@@ -270,6 +279,7 @@ def occlusion_npz(result, extra_meta: Mapping[str, Any]):
         "status_codes": _STATUS_CODES,
         "reference_score": result.reference_score,
         "reference_score_batch": result.reference_score_batch,
+        "target_size_px": result.target_size,
         "config": result.config.to_dict(),
         "target": result.target.to_dict(),
         **dict(extra_meta),

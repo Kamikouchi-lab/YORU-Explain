@@ -25,6 +25,12 @@ reproducible run folders, 152 tests. What follows is concrete work, in order.
    summaries are computed per animal/video first and only then across them
    (mixed models or cluster bootstrap, units chosen explicitly). Frames are
    never treated as independent replicates; the GUI states the unit used.
+   — Partly done 2026-11-09: sources carry an experimental unit
+   (`Project.set_unit`, a units table), events can be spaced in time
+   (`min_gap_s`), and *Export for analysis* writes every event with its unit,
+   descriptive per-unit / per-class summaries (class = mean of unit means) and
+   maps on a grid around each box (`docs/DATA_SCHEMA.md`, exports). Inference
+   across units (intervals, tests) is left to the experimenter's own design.
 6. **Failure statistics**: per run and per class, the share of `disappeared`,
    `class_changed`, `ambiguous`, `candidate_dropped` patches; plots of
    uncertainty (noop residual, batch noise floor from batch-1 vs batch-B reruns).
@@ -32,6 +38,13 @@ reproducible run folders, 152 tests. What follows is concrete work, in order.
    events; add `resume_from=<run_id>`).
 
 ## v0.3 — regions with names
+
+Decided 2026-11-09 (docs/STRATEGY_PROPOSAL*.md): orienting animals and naming
+body parts depend on the species and the question, so YORU-Explain does not
+estimate them. It exports maps in frame pixels and on a grid around each box,
+with frame crops, and re-samples them to orientations the experimenter
+supplies (`api.align_maps`). Regions below are therefore the experimenter's
+masks, measured by the tool — not masks it infers.
 
 1. Import masks (PNG label images, polygons from JSON/CSV) per frame or per
    track; a mask editor in Explore (polygon tool) with undo.

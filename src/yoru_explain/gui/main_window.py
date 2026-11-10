@@ -7,6 +7,10 @@ The window shell -- a viewport fitted to the screen, a Japanese-capable font,
 the Window menu, the remembered size -- is YORU's ``GuiSession``; the tabs
 are YORU-Explain's own, built from DearPyGui and YORU's theme.
 
+The tabs are numbered in the order of the work (project, pick events,
+analyse, results), and a line above them says what to do next
+(:func:`next_step`), with a button to the tab where it is done.
+
 DearPyGui callbacks run on this thread, from the loop in :func:`run`
 (manual callback management), so they touch the tabs' state without locks.
 A callback that raises is reported in a popup and logged; it never ends the
@@ -18,7 +22,7 @@ from __future__ import annotations
 import inspect
 import logging
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import dearpygui.dearpygui as dpg
 
@@ -36,12 +40,47 @@ logger = logging.getLogger("yoru_explain.gui")
 
 WINDOW = "explain_main"
 TAB_BAR = "explain_tabs"
-TABS = (("project", "Project"), ("explore", "Explore"), ("analyze", "Analyze"),
-        ("statistics", "Statistics"), ("settings", "Settings"))
+GUIDE = "explain_guide"
+#: The tabs, numbered in the order of the work.  The keys stay the code's names.
+TABS = (("project", "1  Project"), ("explore", "2  Pick events"), ("analyze", "3  Analyze"),
+        ("statistics", "4  Results"), ("settings", "Settings"))
+TAB_LABELS = dict(TABS)
 #: Tasks the tabs report themselves; any other failure is shown by the window.
-TAB_TASKS = ("analysis", "load_model", "check_seeking")
+TAB_TASKS = ("analysis", "load_model", "check_seeking", "export")
 #: How long quitting waits for a cancelled task to reach its next check.
 QUIT_WAIT_S = 60.0
+
+
+def next_step(state) -> Tuple[str, Optional[str]]:
+    """What to do next, in words, and the key of the tab where it is done."""
+    p, tasks = state.project, state.tasks
+    if p is None:
+        return "Create a new project, or load one, in 1 Project.", "project"
+    if not p.sources:
+        return "Add the videos or images YORU analysed: 1 Project > Add videos / images...", "project"
+    if not p.models:
+        return "Add the model YORU detected with: 1 Project > Add model...", "project"
+    if state.adapter is None:
+        if tasks.current == "load_model":
+            return "Loading the model...", None
+        return "Load the model: select it in 1 Project and press Load selected model.", "project"
+    if tasks.current == "analysis":
+        return "The analysis is running; its progress (and Cancel) is in 3 Analyze.", "analyze"
+    if not p.events:
+        return ("Pick the detections to explain: in 2 Pick events, click a box on a frame and press "
+                "Add selected as event (or import them from YORU's CSV).", "explore")
+    analysed = set()
+    for reader in state.run_readers():
+        analysed.update(row.get("event_id") for row in reader.results if row.get("status") == "ok")
+    selected = state.selected_events
+    if selected and any(e not in analysed for e in selected):
+        return (f"Analyse the {len(selected)} selected event(s): choose the method in 3 Analyze and "
+                "press Analyze.", "analyze")
+    if not analysed:
+        return "Select the events to analyse in 2 Pick events (Ctrl/Shift-click for several).", "explore"
+    return ("See the maps: double-click a row in 4 Results, or Export for analysis there (tables, maps "
+            "around each box, a gallery). To explain more, pick or select other events in 2 Pick "
+            "events.", "statistics")
 
 
 class ExplainApp:
@@ -54,6 +93,7 @@ class ExplainApp:
         self._layout_key = None
         self._quit_at: Optional[float] = None
         self._quit_deadline = 0.0
+        self._guide_target: Optional[str] = None
         self.closed = False
 
     # -- building ------------------------------------------------------------
@@ -77,7 +117,14 @@ class ExplainApp:
                         no_collapse=True, no_scrollbar=True, no_bring_to_front_on_focus=True,
                         width=1400, height=900):
             dpg.bind_item_theme(WINDOW, self.themes.window)
-            with dpg.tab_bar(tag=TAB_BAR):
+            with dpg.group(horizontal=True, tag=GUIDE):
+                t = dpg.add_text("Next:")
+                dpg.bind_item_theme(t, self.themes.header)
+                dpg.add_text("", tag="guide_text", wrap=900)
+                b = dpg.add_button(label="", tag="guide_go", small=True, show=False,
+                                   callback=lambda: self._guide_go())
+                dpg.bind_item_theme(b, self.themes.primary_button)
+            with dpg.tab_bar(tag=TAB_BAR, callback=lambda: self._tab_changed()):
                 for key, label in TABS:
                     with dpg.tab(label=label, tag=f"tab_{key}"):
                         with dpg.child_window(tag=f"page_{key}", border=False):
@@ -92,15 +139,25 @@ class ExplainApp:
             dpg.add_key_press_handler(callback=lambda s, key: self._on_key(key))
         self.state.showResult.connect(lambda *_: self.show_tab("explore"))
         self.state.tasks.failed.connect(self._unhandled)
+        st = self.state
+        for signal in (st.projectChanged, st.modelsChanged, st.adapterChanged, st.eventsChanged,
+                       st.selectionChanged, st.runsChanged, st.tasks.busyChanged):
+            signal.connect(lambda *_: self.update_guide())
         self._status()
+        self.update_guide()
         self.layout()
 
     def build_menus(self) -> None:
         """The viewport menus next to GuiSession's Window menu."""
         with dpg.menu(label="Project"):
             dpg.add_menu_item(label="New project...", callback=lambda: self.project_tab.new_project())
-            dpg.add_menu_item(label="Open project...", callback=lambda: self.project_tab.open_project())
+            dpg.add_menu_item(label="Load project...", callback=lambda: self.project_tab.load_project())
             dpg.add_menu_item(label="Save", callback=lambda: self.project_tab.save())
+            dpg.add_separator()
+            dpg.add_menu_item(label="Check seeking of the selected video",
+                              callback=lambda: self.project_tab.check_seeking())
+            dpg.add_menu_item(label="Add synthetic test model",
+                              callback=lambda: self.project_tab.add_toy())
         with dpg.menu(label="Help"):
             dpg.add_menu_item(label="Open log folder", callback=lambda: self.settings_tab._open_logs())
             dpg.add_menu_item(label=f"YORU-Explain {__version__}", enabled=False)
@@ -112,8 +169,9 @@ class ExplainApp:
             x0, top, width, height = 0, 0, 1400, 900
         dpg.set_item_pos(WINDOW, [x0, top])
         dpg.configure_item(WINDOW, width=width, height=height)
-        # Window padding (12, 10), the tab bar, and the status line below.
-        page_w, page_h = max(400, width - 24), max(300, height - 92)
+        dpg.configure_item("guide_text", wrap=max(300, width - 330))
+        # Window padding (12, 10), the guide line, the tab bar, and the status line below.
+        page_w, page_h = max(400, width - 24), max(300, height - 92 - self._guide_height())
         for key, tab in self.tabs.items():
             dpg.configure_item(f"page_{key}", width=page_w, height=page_h)
             tab.layout(page_w - 4, page_h - 4)
@@ -130,6 +188,40 @@ class ExplainApp:
 
     def show_tab(self, key: str) -> None:
         dpg.set_value(TAB_BAR, f"tab_{key}")
+        self._tab_changed(key)
+
+    def _tab_changed(self, key: Optional[str] = None) -> None:
+        if (key or self.current_tab()) == "statistics":
+            self.statistics_tab.refresh()   # runs written meanwhile (by a script, say) appear too
+        self.update_guide(key)
+
+    # -- the next step ---------------------------------------------------------
+
+    def update_guide(self, current: Optional[str] = None) -> None:
+        text, target = next_step(self.state)
+        self._guide_target = target
+        dpg.set_value("guide_text", text)
+        go = target is not None and target != (current or self.current_tab())
+        if go:
+            dpg.configure_item("guide_go", label=f"Go to {TAB_LABELS[target].replace('  ', ' ')}")
+        dpg.configure_item("guide_go", show=go)
+
+    @property
+    def guide_text(self) -> str:
+        return dpg.get_value("guide_text")
+
+    def _guide_go(self) -> None:
+        if self._guide_target is not None:
+            self.show_tab(self._guide_target)
+
+    @staticmethod
+    def _guide_height() -> int:
+        """The guide line's height (it wraps when the window is narrow), and the gap below it."""
+        try:
+            h = int(dpg.get_item_rect_size(GUIDE)[1])
+        except Exception:
+            h = 0
+        return (h if h > 0 else 22) + 6
 
     def _on_key(self, key) -> None:
         if self.current_tab() == "explore":
@@ -168,7 +260,7 @@ class ExplainApp:
             # A resize, or a new text size from the Window menu (the menu bar
             # grows with it), re-lays out the pages.
             key = (dpg.get_viewport_client_width(), dpg.get_viewport_client_height(),
-                   self.session.text_scale)
+                   self.session.text_scale, self._guide_height())
             if key != self._layout_key:
                 self._layout_key = key
                 self.layout()

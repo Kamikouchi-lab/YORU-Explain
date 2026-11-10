@@ -90,9 +90,10 @@ def test_no_argparse():
 def test_the_core_imports_without_torch_or_a_gui_toolkit():
     code = (
         "import sys\n"
-        "import yoru_explain.api, yoru_explain.core.pipeline, yoru_explain.io.runs\n"
+        "import yoru_explain.api, yoru_explain.core.pipeline, yoru_explain.core.eta, yoru_explain.io.runs\n"
         "import yoru_explain.methods.occlusion, yoru_explain.analysis.summary\n"
-        "import yoru_explain.visualization.overlay\n"
+        "import yoru_explain.visualization.overlay, yoru_explain.visualization.gallery\n"
+        "import yoru_explain.core.export, yoru_explain.analysis.normalize\n"
         "print(sorted(m for m in ('torch', 'dearpygui', 'tkinter', 'PyQt5', 'yoru')"
         " if m in sys.modules))\n"
     )

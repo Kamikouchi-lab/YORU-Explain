@@ -47,8 +47,12 @@ class AppState:
         self.report_error: Callable[[str, BaseException], None] = self._log_error
         err = lambda context, exc: self.report_error(context, exc)  # noqa: E731
         self.projectChanged = Signal(err)
+        #: A model was added to or removed from the project.
+        self.modelsChanged = Signal(err)
         self.adapterChanged = Signal(err)
         self.eventsChanged = Signal(err)
+        #: The events selected in Pick events (``selected_events``) changed.
+        self.selectionChanged = Signal(err)
         self.runsChanged = Signal(err)
         #: ``(run directory, event id)``: show this result in Explore.
         self.showResult = Signal(err)
@@ -57,6 +61,7 @@ class AppState:
         self.project = None
         self.adapter = None
         self.model_id: Optional[str] = None
+        self.model_record = None
         self.device = "auto"
         self.selected_events: List[str] = []
         from yoru_explain.gui.worker import FrameService, TaskRunner
@@ -81,23 +86,57 @@ class AppState:
     def set_project(self, project) -> None:
         self.project = project
         self.selected_events = []
+        if self.adapter is not None:
+            # Keep the loaded model only if the new project has it too (same
+            # file, adapter and options), under that project's id.
+            same = self._same_model_in(project)
+            if same is None:
+                self.set_adapter(None, None)
+            else:
+                self.model_id = same.model_id
+                self.model_record = same
         self._runs.clear()
         self.frames.reset()
         self.projectChanged.emit()
         self.eventsChanged.emit()
         self.runsChanged.emit()
+        self.selectionChanged.emit()
 
     def save_project(self) -> None:
         if self.project is not None:
             self.project.save()
 
+    def select_events(self, event_ids: List[str]) -> None:
+        if list(event_ids) != self.selected_events:
+            self.selected_events = list(event_ids)
+            self.selectionChanged.emit()
+
+    def has_runs(self) -> bool:
+        return self.project is not None and bool(self.project.run_dirs())
+
     # -- model -----------------------------------------------------------
 
-    def set_adapter(self, adapter, model_id: Optional[str]) -> None:
+    def set_adapter(self, adapter, model_id: Optional[str], record=None) -> None:
+        """The loaded model: its adapter, its id in the project, its ``ModelRecord``."""
         self.adapter = adapter
         self.model_id = model_id
+        if record is None and model_id is not None and self.project is not None:
+            try:
+                record = self.project.model(model_id)
+            except Exception:
+                record = None
+        self.model_record = record if adapter is not None else None
         self.frames.adapter = adapter
         self.adapterChanged.emit()
+
+    def _same_model_in(self, project):
+        r = self.model_record
+        if project is None or r is None:
+            return None
+        for m in project.models:
+            if m.sha256 == r.sha256 and m.adapter == r.adapter and dict(m.options) == dict(r.options):
+                return m
+        return None
 
     # -- runs ------------------------------------------------------------
 

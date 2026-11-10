@@ -6,11 +6,13 @@
 gui/ (DearPyGui)              displays, dispatches, never computes an explanation
   │  calls
 api.py ── core/pipeline.py    runs over a project's events, writes run folders
+  │   └── core/export.py      a run as plain tables, grids, crops and a gallery (exports/<run_id>/)
   │
   ├── methods/                occlusion (numpy), Grad-CAM (torch), baselines
-  ├── analysis/               scoring in both identity modes, re-detection matching, summaries
-  ├── io/                     frames, project, run folders, schema, YORU CSV import
-  ├── visualization/          colour tables, overlays, preview PNGs
+  ├── analysis/               scoring in both identity modes, re-detection matching, summaries,
+  │                           box / aligned grids and unit-then-class means (normalize.py)
+  ├── io/                     frames, project (with experimental units), run folders, schema, YORU CSV import
+  ├── visualization/          colour tables, overlays, preview PNGs, the export gallery
   └── adapters/               the only code that runs a model
         ├── base.py           the ModelAdapter contract, capabilities, the identity comparison
         ├── yolov5.py         YORU's YOLOv5, reproduced step by step
@@ -114,6 +116,34 @@ manifest.json (status, identity check, counts, error codes)
 Rows are appended per event, so an interrupted run keeps valid tables of
 what it finished.
 
+`run_analyses` runs several requests one after another on the same events,
+one run folder each (the GUI's *Both methods*: `BOTH_METHODS`, Grad-CAM then
+occlusion). Every request is checked before the first run starts; the next
+run starts only after the previous one completed and while nothing is
+cancelled.
+
+## An export (`core/export.export_run`)
+
+```text
+results.csv, maps/*.npz, perturbations.csv (read once)  +  project (units, videos)
+for each event, by source and frame:
+    events.csv row (failures too, with their codes); unit_id from Project.unit_of
+    finished: map cropped to the analysed region → maps/<event>.npz
+              map on the box grid (analysis/normalize: nearest pixel, NaN stays NaN)
+              frame decoded in order, hash == the run's? → crops/<event>.png + grid picture
+              patches → patches.csv rows in frame pixels and box units
+summary.csv (per unit and class; per class over unit means), box_maps.npz, mean_maps.npz
+gallery/ (visualization/gallery: drawn from the export's own crops, one colour scale per group)
+<run_id>.partial → swapped in for exports/<run_id>/ when complete
+```
+
+The tool's geometry stops at what the model reports (its box, its rotated
+box). Orientation, body parts and statistics across animals depend on the
+species and the question, so they are the experimenter's:
+`analysis/normalize.align_maps` re-samples an export's maps to orientations
+the experimenter supplies, and every table carries `unit_id` for an analysis
+by experimental unit.
+
 ## Occlusion and batches
 
 Perturbed frames are scored in batches of `batch_size`. Every batch is padded
@@ -140,9 +170,14 @@ back to in-order reading. Analysis runs always read in order.
   font, Window menu, remembered size) with YORU's theme and a pink accent.
 * `TaskRunner` — one long task at a time (load a model, an analysis run, a
   seek check) on its own thread; cancellation is a `threading.Event` the
-  pipeline polls between batches and events.
-* `FrameService` — decodes frames and runs the detector for the Explore view
-  on a second thread, keeping only the latest request (slider dragging).
+  pipeline polls between batches and events. An analysis reports its
+  `Progress` with each fraction; the Analyze tab estimates the time left from
+  them (`core/eta.TimeLeft`: the pace since the first progress, so set-up
+  does not count; counted down every frame between reports, and derived
+  again from the pace so far when a report is overdue).
+* `FrameService` — decodes frames and runs the detector for the Explore
+  view (the *2 Pick events* tab) on a second thread, keeping only the latest
+  request (slider dragging).
 * Neither touches DearPyGui. They leave progress and results behind; the
   loop calls `poll()` once per frame and delivers them as `state.Signal`
   callbacks on the render thread.
@@ -152,6 +187,14 @@ back to in-order reading. Analysis runs always read in order.
 * Explore's frame is an ImPlot image series whose axes are frame pixels
   (y downwards; the texture's UVs are flipped for that); textures above
   2048×1536 are downscaled for display only.
+* The tabs are numbered in the order of the work (1 Project, 2 Pick events,
+  3 Analyze, 4 Results). A *Next:* line above them (`main_window.next_step`)
+  names the first thing missing — project, video, model, loaded model,
+  events, analysed selection — and offers a button to its tab; it is
+  recomputed on the state's signals, never per frame. Choices that only
+  matter while adding something (a new project's name and place, a model's
+  type and thresholds, which detections of a YORU CSV to import) are asked
+  in dialogs (`Popups.dialog`), not kept on the tabs.
 
 ## Logs
 

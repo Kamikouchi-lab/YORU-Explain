@@ -11,16 +11,19 @@
     └── runs/<run_id>/    one folder per analysis run (see io.runs)
 
 Videos and weights are referenced by path and identified by hash; they are
-never copied into the project.
+never copied into the project.  A source or model taken out of the project
+is kept under ``removed``, so its id is never given to another file: events
+and runs that name it keep meaning what they meant.
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from yoru_explain.core.errors import ErrorCode, ExplainError
 from yoru_explain.core.hashing import QUICK_ID_METHOD, quick_file_id, sha256_file
@@ -38,6 +41,12 @@ from yoru_explain.io.frames import kind_of, open_source
 PROJECT_FILE = "project.json"
 EVENTS_FILE = "events.csv"
 RUNS_DIR = "runs"
+REMOVED_KEY = "removed"
+
+#: Characters Windows does not allow in a folder name, and the names it reserves.
+_BAD_NAME_CHARS = '<>:"/\\|?*'
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                   *(f"LPT{i}" for i in range(1, 10))}
 
 
 def now_iso() -> str:
@@ -48,6 +57,44 @@ def _atomic_write_text(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _next_id(prefix: str, width: int, used: Iterable[str]) -> str:
+    """``prefix`` + one more than the highest number among *used* (never a gap left by a removal)."""
+    numbers = [int(u[len(prefix):]) for u in used
+               if u and u.startswith(prefix) and u[len(prefix):].isdigit()]
+    return f"{prefix}{max(numbers, default=0) + 1:0{width}d}"
+
+
+def new_project_folder(name: str, location) -> Path:
+    """The folder ``location/name`` a new project would be created in.
+
+    Raises :class:`ExplainError` (``INVALID_CONFIG``) with a sentence a user
+    can act on when the name is not a valid folder name, the location does
+    not exist, or the folder is already a project or holds other files.
+    """
+    name = str(name or "").strip()
+    if not name:
+        raise ExplainError(ErrorCode.INVALID_CONFIG, "Enter a project name.")
+    bad = sorted({c for c in name if c in _BAD_NAME_CHARS or ord(c) < 32})
+    if bad:
+        raise ExplainError(ErrorCode.INVALID_CONFIG,
+                           f"A project name cannot contain {' '.join(bad)}.")
+    if name.endswith(".") or name in (".", "..") or name.split(".")[0].upper() in _RESERVED_NAMES:
+        raise ExplainError(ErrorCode.INVALID_CONFIG, f"{name!r} cannot be a folder name.")
+    if not str(location or "").strip():
+        raise ExplainError(ErrorCode.INVALID_CONFIG, "Choose the folder to create the project in.")
+    parent = Path(str(location).strip())
+    if not parent.is_dir():
+        raise ExplainError(ErrorCode.INVALID_CONFIG, f"The location {parent} does not exist.")
+    folder = parent / name
+    if (folder / PROJECT_FILE).exists():
+        raise ExplainError(ErrorCode.INVALID_CONFIG,
+                           f"{folder} is already a project; open it with Load project.")
+    if folder.exists() and (not folder.is_dir() or any(folder.iterdir())):
+        raise ExplainError(ErrorCode.INVALID_CONFIG,
+                           f"{folder} already exists and is not empty; choose another name.")
+    return folder
 
 
 def target_to_event_row(target: ExplanationTarget, note: str = "", created: str = "") -> Dict[str, Any]:
@@ -177,8 +224,11 @@ class Project:
         with open_source(path, v_flip=v_flip, h_flip=h_flip) as reader:
             info = reader.info
             seek = reader.check_seeking() if (check_seeking and kind == "video") else None
+        used = ([s["source_id"] for s in self.sources]
+                + [s["source_id"] for s in self.removed_entries("sources")]
+                + [e.get("source_id", "") for e in self._events])
         entry = {
-            "source_id": f"src-{len(self.sources) + 1:03d}",
+            "source_id": _next_id("src-", 3, used),
             "path": str(path),
             "kind": kind,
             "v_flip": bool(v_flip),
@@ -207,9 +257,164 @@ class Project:
         same = quick_file_id(p) == s["quick_id"]
         return {"status": "ok" if same else "changed", "path": str(p)}
 
+    def source_file_status(self, source_id: str) -> str:
+        """A quick look, cheap enough for every redraw: ``ok``, ``missing`` or ``changed``.
+
+        Only the existence and the size are compared; :meth:`verify_source`
+        (which every run records) also reads the file's ends.
+        """
+        s = self.source(source_id)
+        p = Path(s["path"])
+        if not p.is_file():
+            return "missing"
+        return "ok" if s.get("size") in (None, p.stat().st_size) else "changed"
+
     def open_source(self, source_id: str):
         s = self.source(source_id)
         return open_source(s["path"], v_flip=s["v_flip"], h_flip=s["h_flip"])
+
+    # -- experimental units ----------------------------------------------
+
+    def _source_entry(self, source_id: str) -> Optional[Dict[str, Any]]:
+        """A source of the project, or one taken out of it (runs may name it); None if unknown."""
+        for s in list(self.sources) + self.removed_entries("sources"):
+            if s["source_id"] == source_id:
+                return s
+        return None
+
+    def unit_of(self, source_id: str) -> Tuple[str, bool]:
+        """``(unit_id, assigned)``: the experimental unit the events of a source belong to.
+
+        The unit is what the experimenter treats as one independent sample
+        -- an animal, a pair, a cage -- and is set with :meth:`set_unit` or
+        :meth:`assign_units_from_csv`.  A source without one is its own unit:
+        ``(source_id, False)``.  Frames are never units.
+        """
+        s = self._source_entry(source_id)
+        unit = str((s or {}).get("unit_id") or "").strip()
+        return (unit, True) if unit else (source_id, False)
+
+    def set_unit(self, source_id: str, unit_id: Optional[str]) -> None:
+        """Put a source's events into experimental unit *unit_id* (``None`` / empty: unset).
+
+        Several sources may share a unit (the same animal filmed twice).
+        """
+        s = self.source(source_id)
+        unit = str(unit_id or "").strip()
+        if any(ord(c) < 32 for c in unit):
+            raise ExplainError(ErrorCode.INVALID_CONFIG, f"unit id {unit_id!r} holds a control character")
+        if unit:
+            s["unit_id"] = unit
+        else:
+            s.pop("unit_id", None)
+
+    def assign_units_from_csv(self, csv_path) -> Dict[str, Any]:
+        """Set the units of sources from a table with the columns ``video`` and ``unit_id``.
+
+        ``video`` names a source by its id (``src-001``), its full path, or its
+        file name (when only one source has that name).  Other columns (a
+        condition, a date, ...) are left for the experimenter's own analysis
+        and reported as ignored; rows naming no source of the project are
+        reported, not guessed.  Returns ``{"assigned": {source_id: unit_id},
+        "unmatched": [...], "ambiguous": [...], "ignored_columns": [...]}``.
+        """
+        path = Path(csv_path)
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            header = [h.strip() for h in next(reader, [])]
+            rows = [dict(zip(header, (c.strip() for c in line))) for line in reader
+                    if any(c.strip() for c in line)]
+        if "video" not in header or "unit_id" not in header:
+            raise ExplainError(ErrorCode.INVALID_CONFIG,
+                               f"{path.name}: needs the columns video and unit_id (has {', '.join(header)})")
+        by_id = {s["source_id"]: s for s in self.sources}
+        by_path = {os.path.normcase(str(Path(s["path"]).resolve())): s for s in self.sources}
+        by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for s in self.sources:
+            by_name.setdefault(os.path.normcase(Path(s["path"]).name), []).append(s)
+        assigned: Dict[str, str] = {}
+        unmatched: List[str] = []
+        ambiguous: List[str] = []
+        for row in rows:
+            video, unit = row.get("video", ""), row.get("unit_id", "")
+            if not video:
+                continue
+            s = by_id.get(video)
+            if s is None:
+                s = by_path.get(os.path.normcase(str(Path(video).resolve()))) if Path(video).is_absolute() \
+                    else None
+            if s is None:
+                named = by_name.get(os.path.normcase(Path(video).name), [])
+                if len(named) > 1:
+                    ambiguous.append(video)
+                    continue
+                s = named[0] if named else None
+            if s is None:
+                unmatched.append(video)
+                continue
+            self.set_unit(s["source_id"], unit or None)
+            assigned[s["source_id"]] = unit
+        return {"assigned": assigned, "unmatched": unmatched, "ambiguous": ambiguous,
+                "ignored_columns": [h for h in header if h not in ("video", "unit_id")]}
+
+    def events_of_sources(self, source_ids: Iterable[str]) -> List[str]:
+        """Ids of the events picked on these sources."""
+        ids = set(source_ids)
+        return [e["event_id"] for e in self._events if e.get("source_id") in ids]
+
+    def remove_sources(self, source_ids: Iterable[str]) -> List[str]:
+        """Take sources out of the project, with the events picked on them.
+
+        The files are not touched, and runs keep their results.  The entries
+        move to ``removed`` (stamped with the time), so their ids are never
+        given again.  Returns the ids of the events removed with them.
+        """
+        drop = set(source_ids)
+        for sid in drop:
+            self.source(sid)   # an unknown id is an error, not a no-op
+        events = self.events_of_sources(drop)
+        self.remove_events(events)
+        stamp = now_iso()
+        gone = [dict(s, removed=stamp) for s in self.sources if s["source_id"] in drop]
+        self.data["sources"] = [s for s in self.sources if s["source_id"] not in drop]
+        self._removed("sources").extend(gone)
+        return events
+
+    # -- detections CSVs -------------------------------------------------
+
+    def attach_detections(self, source_id: str, csv_path) -> Dict[str, Any]:
+        """Attach a YORU / YORU-Tracker detections CSV to a source (once per file).
+
+        Its boxes are shown on the frames; turning them into events is
+        :func:`yoru_explain.api.add_events_from_detections_csv`.
+        """
+        from yoru_explain.io.detections_csv import load_detections_csv
+
+        s = self.source(source_id)
+        path = Path(csv_path).resolve()
+        layout, frames = load_detections_csv(path)
+        entry = {"path": str(path), "layout": layout, "frames": len(frames),
+                 "detections": sum(len(v) for v in frames.values())}
+        files = [e for e in s.get("detections_files", []) if Path(e["path"]) != path]
+        s["detections_files"] = files + [entry]
+        return entry
+
+    def detach_detections(self, source_id: str, csv_path=None) -> int:
+        """Detach one detections CSV (or, with no *csv_path*, all) from a source."""
+        s = self.source(source_id)
+        files = s.get("detections_files", [])
+        keep = [] if csv_path is None else [e for e in files if Path(e["path"]) != Path(csv_path).resolve()]
+        s["detections_files"] = keep
+        return len(files) - len(keep)
+
+    # -- removed entries -------------------------------------------------
+
+    def removed_entries(self, kind: str) -> List[Dict[str, Any]]:
+        """Sources or models (*kind*) taken out of the project, oldest first."""
+        return list(self.data.get(REMOVED_KEY, {}).get(kind, []))
+
+    def _removed(self, kind: str) -> List[Dict[str, Any]]:
+        return self.data.setdefault(REMOVED_KEY, {}).setdefault(kind, [])
 
     # -- models ----------------------------------------------------------
 
@@ -237,9 +442,32 @@ class Project:
         for m in self.models:
             if m.sha256 == sha and m.adapter == adapter and dict(m.options) == options:
                 return m
-        record = ModelRecord(f"mdl-{len(self.models) + 1:03d}", path_text, sha, adapter, options)
-        self.data["models"].append(record.to_dict())
+        # An event remembers the model it was picked with, and its candidate
+        # index is only used with that model: an id is never given twice.
+        used = ([m.model_id for m in self.models]
+                + [m.get("model_id", "") for m in self.removed_entries("models")]
+                + [e.get("model_id", "") for e in self._events])
+        record = ModelRecord(_next_id("mdl-", 3, used), path_text, sha, adapter, options)
+        self.data.setdefault("models", []).append(record.to_dict())
         return record
+
+    def remove_models(self, model_ids: Iterable[str]) -> int:
+        """Take models out of the project; the files are not touched.
+
+        Events picked with a removed model stay: a run with another model
+        finds each of them again by class and IoU (its candidate index is not
+        used).  The entries move to ``removed``, so their ids are never given
+        again.  Returns how many were removed.
+        """
+        drop = set(model_ids)
+        for mid in drop:
+            self.model(mid)
+        stamp = now_iso()
+        models = self.data.setdefault("models", [])
+        gone = [dict(m, removed=stamp) for m in models if m["model_id"] in drop]
+        self.data["models"] = [m for m in models if m["model_id"] not in drop]
+        self._removed("models").extend(gone)
+        return len(gone)
 
     # -- events ----------------------------------------------------------
 
